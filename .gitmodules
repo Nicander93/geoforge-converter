@@ -1,4 +1,4 @@
-﻿[submodule "thirdparty/ufbx"]
+[submodule "thirdparty/ufbx"]
 	path = thirdparty/ufbx
 	url = https://github.com/ufbx/ufbx.git
 [submodule "thirdparty/base64"]
