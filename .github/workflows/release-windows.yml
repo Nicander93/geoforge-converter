@@ -12,6 +12,7 @@ permissions:
 jobs:
   windows-x64:
     runs-on: windows-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,9 +22,13 @@ jobs:
         uses: actions/cache@v4
         id: cache-vcpkg
         with:
-          path: ${{ github.workspace }}/vcpkg_installed/
-          key: win-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
-          restore-keys: win-vcpkg-
+          path: |
+            ${{ github.workspace }}/vcpkg_installed/
+            ${{ github.workspace }}/vcpkg/downloads/
+          key: win-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-r2
+          restore-keys: |
+            win-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-
+            win-vcpkg-
 
       - name: Setup vcpkg (checkout only)
         uses: lukka/run-vcpkg@v11
@@ -40,16 +45,25 @@ jobs:
         if: steps.cache-vcpkg.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = "Continue"
           $env:VCPKG_DEFAULT_TRIPLET = "x64-windows"
           $env:VCPKG_BINARY_SOURCES = "clear;x-gha,readwrite"
+          $vcpkg = Join-Path $env:VCPKG_ROOT "vcpkg.exe"
+          $downloads = Join-Path $env:VCPKG_ROOT "downloads"
           $ok = $false
-          for ($i = 1; $i -le 4; $i++) {
+          for ($i = 1; $i -le 8; $i++) {
             Write-Host "=== vcpkg install attempt $i ==="
-            & "$env:VCPKG_ROOT\vcpkg.exe" install --recurse --clean-after-build --x-install-root "$env:GITHUB_WORKSPACE\vcpkg_installed"
+            # Drop partial/corrupt downloads that cause unexpected hash failures
+            if (Test-Path $downloads) {
+              Get-ChildItem $downloads -Filter "*.part" -ErrorAction SilentlyContinue | Remove-Item -Force
+              Get-ChildItem $downloads -Filter "*tinygltf*" -ErrorAction SilentlyContinue | Remove-Item -Force
+              Get-ChildItem $downloads -Filter "*zlib*" -ErrorAction SilentlyContinue | Remove-Item -Force
+              Get-ChildItem $downloads -Filter "*expat*" -ErrorAction SilentlyContinue | Remove-Item -Force
+            }
+            & $vcpkg install --recurse --clean-after-build --x-install-root "$env:GITHUB_WORKSPACE\vcpkg_installed"
             if ($LASTEXITCODE -eq 0) { $ok = $true; break }
             Write-Warning "vcpkg install failed (exit $LASTEXITCODE); sleeping before retry"
-            Start-Sleep -Seconds (30 * $i)
+            Start-Sleep -Seconds ([Math]::Min(300, 45 * $i))
           }
           if (-not $ok) { exit 1 }
 
