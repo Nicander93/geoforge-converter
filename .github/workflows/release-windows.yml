@@ -25,16 +25,33 @@ jobs:
           key: win-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: win-vcpkg-
 
-      - name: Setup vcpkg
+      - name: Setup vcpkg (checkout only)
         uses: lukka/run-vcpkg@v11
         with:
           doNotCache: true
           vcpkgGitCommitId: "84bab45d415d22042bd0b9081aea57f362da3f35"
-          runVcpkgInstall: ${{ steps.cache-vcpkg.outputs.cache-hit != 'true' }}
+          runVcpkgInstall: false
         env:
           VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
           VCPKG_INSTALLED_DIR: ${{ github.workspace }}/vcpkg_installed
           VCPKG_DEFAULT_TRIPLET: x64-windows
+
+      - name: Install vcpkg ports (retry)
+        if: steps.cache-vcpkg.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:VCPKG_DEFAULT_TRIPLET = "x64-windows"
+          $env:VCPKG_BINARY_SOURCES = "clear;x-gha,readwrite"
+          $ok = $false
+          for ($i = 1; $i -le 4; $i++) {
+            Write-Host "=== vcpkg install attempt $i ==="
+            & "$env:VCPKG_ROOT\vcpkg.exe" install --recurse --clean-after-build --x-install-root "$env:GITHUB_WORKSPACE\vcpkg_installed"
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Warning "vcpkg install failed (exit $LASTEXITCODE); sleeping before retry"
+            Start-Sleep -Seconds (30 * $i)
+          }
+          if (-not $ok) { exit 1 }
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -42,7 +59,6 @@ jobs:
         run: cargo build --release
         env:
           VCPKG_HAS_BEEN_INSTALLED: "1"
-          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
 
       - name: Package converter runtime
         shell: pwsh
@@ -52,7 +68,6 @@ jobs:
           $zip = "geoforge-converter-$ver-windows-x64.zip"
           Compress-Archive -Path dist/converter/* -DestinationPath $zip -Force
           Get-FileHash $zip -Algorithm SHA256 | Format-List
-          echo "ZIP_NAME=$zip" >> $env:GITHUB_ENV
           (Get-FileHash $zip -Algorithm SHA256).Hash | Out-File -Encoding ascii "$zip.sha256"
 
       - name: Upload artifact
