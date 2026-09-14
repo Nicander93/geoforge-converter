@@ -1,0 +1,26 @@
+[package]
+name = "_3dtile"
+version = "0.1.0"
+authors = ["fanzhenhua <fanzhenhua@superengine.com.cn>"]
+edition = "2021"
+description = "GeoForge OSGB → 3D Tiles converter runtime (upstream: fanvanzh/3dtiles)"
+
+[dependencies]
+libc = "0.2"
+clap = "4.5.53"
+chrono = "0.4"
+rayon = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-xml-rs = "0.8.2"
+log = "0.4"
+env_logger = "0.11.8"
+byteorder = "1.2"
+
+[build-dependencies]
+cmake = "0.1"
+pkg-config = "0.3"
+
+[workspace]
+members = ["."]
+resolver = "2"

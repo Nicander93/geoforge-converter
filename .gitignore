@@ -1,0 +1,7 @@
+/target/
+/vcpkg_installed/
+/.cache/
+/build/
+/release/
+*.zip
+.DS_Store
