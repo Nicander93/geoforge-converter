@@ -121,9 +121,8 @@ target_link_libraries(_3dtile PRIVATE glm::glm-header-only)
 find_path(EARCUT_HPP_INCLUDE_DIRS "mapbox/earcut.hpp")
 target_include_directories(_3dtile PRIVATE ${EARCUT_HPP_INCLUDE_DIRS})
 
-# tinygltf
-find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
-target_include_directories(_3dtile PRIVATE ${TINYGLTF_INCLUDE_DIRS})
+# tinygltf (vendored; avoid flaky vcpkg GitHub archive downloads)
+target_include_directories(_3dtile PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/tinygltf)
 
 # stb
 find_package(Stb REQUIRED)

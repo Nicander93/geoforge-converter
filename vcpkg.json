@@ -34,7 +34,6 @@
     "osg",
     "spdlog",
     "sqlite3",
-    "stb",
-    "tinygltf"
+    "stb"
   ]
 }

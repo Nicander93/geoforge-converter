@@ -16,3 +16,9 @@ _3dtile.exe -f osgb -i <INPUT> -o <OUTPUT> [-c <CONFIG>] [-v]
 ```
 
 Top-level rebuild is **not** part of this converter; GeoForge uses `top_rebuild` separately.
+
+## Vendored headers
+
+| Path | Pin | Why |
+| --- | --- | --- |
+| `thirdparty/tinygltf` | syoyo/tinygltf `v2.9.7` | Avoid vcpkg GitHub-archive hash failures on CI |
