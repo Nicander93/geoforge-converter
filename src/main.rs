@@ -311,8 +311,7 @@ fn main() {
 
     match format {
         "osgb" => {
-            // osgb默认开启material_unlit
-            convert_osgb(input, output, tile_config, enable_simplify, enable_texture_compress, enable_draco, true);
+            convert_osgb(input, output, tile_config, enable_simplify, enable_texture_compress, enable_draco, enable_unlit);
         }
         "shape" => {
             convert_shapefile(
