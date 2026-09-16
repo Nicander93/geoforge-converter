@@ -222,21 +222,21 @@ fn main() {
         Some(s) => s.as_str(),
         None => {
             error!("--input is required for convert");
-            return;
+            std::process::exit(2);
         }
     };
     let output = match matches.get_one::<String>("output") {
         Some(s) => s.as_str(),
         None => {
             error!("--output is required for convert");
-            return;
+            std::process::exit(2);
         }
     };
     let format = match matches.get_one::<String>("format") {
         Some(s) => s.as_str(),
         None => {
             error!("--format is required for convert");
-            return;
+            std::process::exit(2);
         }
     };
     let tile_config = matches
@@ -303,19 +303,19 @@ fn main() {
     let in_path = std::path::Path::new(input);
     if !in_path.exists() {
         error!("{} does not exists.", input);
-        return;
+        std::process::exit(2);
     }
     // Canonicalize path to ensure absolute paths for C++ loader
     let abs_input_buf = in_path.canonicalize().unwrap_or(in_path.to_path_buf());
-    let input = abs_input_buf.to_str().unwrap();
+    let input = abs_input_buf.to_string_lossy();
 
     match format {
         "osgb" => {
-            convert_osgb(input, output, tile_config, enable_simplify, enable_texture_compress, enable_draco, enable_unlit);
+            convert_osgb(&input, output, tile_config, enable_simplify, enable_texture_compress, enable_draco, enable_unlit);
         }
         "shape" => {
             convert_shapefile(
-                input,
+                &input,
                 output,
                 height_field,
                 enable_lod,
@@ -324,14 +324,14 @@ fn main() {
             );
         }
         "gltf" => {
-            convert_gltf(input, output);
+            convert_gltf(&input, output);
         }
         "b3dm" => {
-            convert_b3dm(input, output);
+            convert_b3dm(&input, output);
         }
         "fbx" => {
             convert_fbx_cmd(
-                input,
+                &input,
                 output,
                 tile_config,
                 enable_texture_compress,
@@ -346,7 +346,25 @@ fn main() {
         }
         _ => {
             error!("not support now.");
+            std::process::exit(2);
         }
+    }
+
+    // The native conversion functions predate a Result-based CLI boundary and
+    // report most failures through logs. Make the process status authoritative
+    // for the processor: a missing final artifact is always a failed command.
+    if !conversion_output_exists(format, output) {
+        error!("conversion did not produce the expected output: {}", output);
+        std::process::exit(1);
+    }
+}
+
+fn conversion_output_exists(format: &str, output: &str) -> bool {
+    let path = std::path::Path::new(output);
+    match format {
+        "osgb" | "shape" | "fbx" => path.join("tileset.json").is_file(),
+        "gltf" | "b3dm" => path.is_file(),
+        _ => false,
     }
 }
 
@@ -438,27 +456,72 @@ fn convert_b3dm(src: &str, dest: &str) {
     }
     if !src.ends_with(".b3dm") {
         error!("input format must be b3dm");
+        return;
     }
     if Path::new(src).exists() && Path::new(src).is_file() {
         if let Ok(mut f) = File::open(src) {
             let mut buffer = Vec::new();
-            f.read_to_end(&mut buffer).unwrap();
+            if let Err(error) = f.read_to_end(&mut buffer) {
+                error!("read b3dm failed: {error}");
+                return;
+            }
+            if buffer.len() < 28 || &buffer[0..4] != b"b3dm" {
+                error!("invalid b3dm header: {}", src);
+                return;
+            }
             let mut rdr = Cursor::new(buffer);
             let offset = {
                 rdr.set_position(12);
-                let fj_len = rdr.read_u32::<LittleEndian>().unwrap();
-                rdr.read_u32::<LittleEndian>().unwrap();
-                let bj_len = rdr.read_u32::<LittleEndian>().unwrap();
-                let offset = fj_len + bj_len + 28;
-                offset as usize
+                let fj_len = match rdr.read_u32::<LittleEndian>() {
+                    Ok(value) => value as usize,
+                    Err(error) => {
+                        error!("invalid b3dm feature table length: {error}");
+                        return;
+                    }
+                };
+                let fb_len = match rdr.read_u32::<LittleEndian>() {
+                    Ok(value) => value as usize,
+                    Err(error) => {
+                        error!("invalid b3dm feature table binary length: {error}");
+                        return;
+                    }
+                };
+                let bj_len = match rdr.read_u32::<LittleEndian>() {
+                    Ok(value) => value as usize,
+                    Err(error) => {
+                        error!("invalid b3dm batch table JSON length: {error}");
+                        return;
+                    }
+                };
+                let bb_len = match rdr.read_u32::<LittleEndian>() {
+                    Ok(value) => value as usize,
+                    Err(error) => {
+                        error!("invalid b3dm batch table binary length: {error}");
+                        return;
+                    }
+                };
+                28usize
+                    .checked_add(fj_len)
+                    .and_then(|value| value.checked_add(fb_len))
+                    .and_then(|value| value.checked_add(bj_len))
+                    .and_then(|value| value.checked_add(bb_len))
+                    .unwrap_or(usize::MAX)
             };
-            if let Ok(mut df) = File::create(dest) {
-                let buf = rdr.get_ref();
-                df.write_all(&buf.as_slice()[offset..]).unwrap();
+            let buf = rdr.get_ref();
+            if offset >= buf.len() {
+                error!("b3dm tables exceed file: {}", src);
+                return;
             }
+            match File::create(dest).and_then(|mut file| file.write_all(&buf[offset..])) {
+                Ok(()) => info!("wrote {}", dest),
+                Err(error) => error!("write gltf failed: {error}"),
+            }
+        } else {
+            error!("open b3dm failed: {}", src);
         }
+    } else {
+        error!("input b3dm does not exist: {}", src);
     }
-    info!("task over");
 }
 
 // convert any thing to gltf
@@ -478,7 +541,13 @@ fn convert_gltf(src: &str, dest: &str) {
         return;
     }
     unsafe {
-        let c_str = CString::new(dest).unwrap();
+        let c_str = match CString::new(dest) {
+            Ok(value) => value,
+            Err(error) => {
+                error!("output path contains NUL: {error}");
+                return;
+            }
+        };
         let ret = osgb::osgb2glb(src.as_ptr(), c_str.as_ptr() as *const u8);
         if !ret {
             error!("convert failed");
@@ -496,6 +565,14 @@ struct ModelMetadata {
     pub version: String,
     pub SRS: String,
     pub SRSOrigin: String,
+}
+
+fn parse_origin_values(value: &str) -> Option<Vec<f64>> {
+    let mut values = Vec::new();
+    for part in value.split(',') {
+        values.push(part.trim().parse::<f64>().ok()?);
+    }
+    Some(values)
 }
 
 fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enable_texture_compress: bool, enable_draco: bool, enable_unlit: bool) {
@@ -616,12 +693,11 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                             } else if v[0] == "EPSG" {
                                 // call gdal to convert
                                 if let Ok(srs) = v[1].parse::<i32>() {
-                                    let mut pt: Vec<f64> = metadata
-                                        .SRSOrigin
-                                        .split(",")
-                                        .map(|v| v.parse().unwrap())
-                                        .collect();
-                                    if pt.len() >= 2 {
+                                    let Some(mut pt) = parse_origin_values(&metadata.SRSOrigin) else {
+                                        error!("SRSOrigin contains a non-numeric value");
+                                        return;
+                                    };
+                                    if pt.len() >= 3 {
                                         let gdal_data: String = {
                                             use std::path::Path;
                                             let exe_dir = ::std::env::current_exe().unwrap();
@@ -675,12 +751,11 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                         } else {
                             // error!("SRS content error");
                             // treat as wkt
-                            let mut pt: Vec<f64> = metadata
-                                .SRSOrigin
-                                .split(",")
-                                .map(|v| v.parse().unwrap())
-                                .collect();
-                            if pt.len() >= 2 {
+                            let Some(mut pt) = parse_origin_values(&metadata.SRSOrigin) else {
+                                error!("SRSOrigin contains a non-numeric value");
+                                return;
+                            };
+                            if pt.len() >= 3 {
                                 let gdal_data: String = {
                                     use std::path::Path;
                                     let exe_dir = ::std::env::current_exe().unwrap();

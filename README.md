@@ -17,6 +17,18 @@ git submodule update --init --recursive
 cargo build --release
 ```
 
+For an offline or CI build with a pre-installed manifest tree, set
+`GEOFORGE_VCPKG_INSTALLED_ROOT` to the directory that contains
+`x64-windows/` and set `VCPKG_HAS_BEEN_INSTALLED=0`. The build then disables
+vcpkg manifest re-installation and reuses that tree:
+
+```powershell
+$env:VCPKG_ROOT = "C:\\src\\vcpkg"
+$env:GEOFORGE_VCPKG_INSTALLED_ROOT = "D:\\deps\\vcpkg_installed"
+$env:VCPKG_HAS_BEEN_INSTALLED = "0"
+cargo build --release
+```
+
 Packaging for GitHub Release is done by CI on tag `v*.*.*` (see `.github/workflows/release-windows.yml`).
 
 ## Runtime layout (Windows zip)
