@@ -400,7 +400,10 @@ int get_lvl_num(std::string file_name){
     return -1;
 }
 
-osg_tree get_all_tree(std::string& file_name) {
+osg_tree get_all_tree(std::string& file_name, bool* read_error = nullptr) {
+    if (read_error) {
+        *read_error = false;
+    }
     osg_tree root_tile;
     vector<string> fileNames = { file_name };
 
@@ -417,6 +420,9 @@ osg_tree get_all_tree(std::string& file_name) {
         if (!root) {
             std::string name = utf8_string(file_name.c_str());
             LOG_E("read node files [%s] fail!", name.c_str());
+            if (read_error) {
+                *read_error = true;
+            }
             return root_tile;
         }
         root_tile.file_name = file_name;
@@ -425,7 +431,15 @@ osg_tree get_all_tree(std::string& file_name) {
     }
 
     for (auto& i : infoVisitor.sub_node_names) {
-        osg_tree tree = get_all_tree(i);
+        bool child_read_error = false;
+        osg_tree tree = get_all_tree(i, &child_read_error);
+        if (child_read_error) {
+            if (read_error) {
+                *read_error = true;
+            }
+            root_tile.file_name.clear();
+            return root_tile;
+        }
         if (!tree.file_name.empty()) {
             // When the node type is Group, simply add its child nodes to the current node
             if (tree.type == 0) {
@@ -1584,8 +1598,9 @@ osgb23dtile_path(const char* in_path, const char* out_path,
     *len = 0;
     try {
     std::string path = osg_string(in_path);
-    osg_tree root = get_all_tree(path);
-    if (root.file_name.empty())
+    bool read_error = false;
+    osg_tree root = get_all_tree(path, &read_error);
+    if (read_error || root.file_name.empty())
     {
         LOG_E( "open file [%s] fail!", in_path);
         return NULL;
