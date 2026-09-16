@@ -438,6 +438,19 @@ osg_tree get_all_tree(std::string& file_name) {
         }
     }
 
+    // Some real ContextCapture exports contain tiny placeholder OSGB nodes
+    // with no geometry (for example an empty leaf at the edge of a block).
+    // Treat a node with neither geometry nor usable descendants as an empty
+    // leaf so its parent can omit it.  Returning an empty tree here keeps the
+    // batch conversion alive while still logging the exact source path.
+    if (infoVisitor.geometry_array.empty() &&
+        infoVisitor.other_geometry_array.empty() &&
+        root_tile.sub_nodes.empty()) {
+        std::string name = utf8_string(file_name.c_str());
+        LOG_W("skipping empty OSGB node [%s]", name.c_str());
+        root_tile.file_name.clear();
+    }
+
     // When the node contains PagedLOD and Other nodes, create a new group node
     if (!infoVisitor.other_geometry_array.empty() && !infoVisitor.geometry_array.empty()) {
         osg_tree new_root_tile;
