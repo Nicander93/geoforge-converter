@@ -105,7 +105,7 @@ fn transform_point(m: &[f64], p: &[f64; 3]) -> [f64; 3] {
     [x, y, z]
 }
 
-fn walk_path(dir: &Path, cb: &mut dyn FnMut(&str)) -> io::Result<()> {
+fn walk_path(dir: &Path, cb: &mut dyn FnMut(&Path)) -> io::Result<()> {
     if dir.is_dir() {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
@@ -115,7 +115,7 @@ fn walk_path(dir: &Path, cb: &mut dyn FnMut(&str)) -> io::Result<()> {
             } else {
                 if let Some(osdir) = path.extension() {
                     if osdir.to_str() == Some("json") {
-                        cb(&path.to_str().unwrap());
+                        cb(&path);
                     }
                 }
             }
@@ -133,9 +133,27 @@ pub fn shape_batch_convert(
     enable_draco: bool,
 ) -> bool {
     unsafe {
-        let source_vec = CString::new(from).unwrap();
-        let dest_vec = CString::new(to).unwrap();
-        let height_vec = CString::new(height).unwrap();
+        let source_vec = match CString::new(from) {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!("shape input path contains a NUL byte");
+                return false;
+            }
+        };
+        let dest_vec = match CString::new(to) {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!("shape output path contains a NUL byte");
+                return false;
+            }
+        };
+        let height_vec = match CString::new(height) {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!("shape height field contains a NUL byte");
+                return false;
+            }
+        };
 
         // Create params structure
         let params = ShapeConversionParams {
@@ -194,9 +212,28 @@ pub fn shape_batch_convert(
         let mut root_min = [INFINITY, INFINITY, INFINITY];
         let mut root_max = [NEG_INFINITY, NEG_INFINITY, NEG_INFINITY];
         let mut json_vec = vec![];
-        walk_path(&Path::new(to).join("tile"), &mut |dir| {
-            let file = File::open(dir).unwrap();
-            let val: serde_json::Value = serde_json::from_reader(file).unwrap();
+        let mut walk_error: Option<String> = None;
+        let walk_result = walk_path(&Path::new(to).join("tile"), &mut |dir| {
+            let file = match File::open(dir) {
+                Ok(file) => file,
+                Err(error) => {
+                    walk_error = Some(format!(
+                        "open tile metadata {} failed: {error}",
+                        dir.display()
+                    ));
+                    return;
+                }
+            };
+            let val: serde_json::Value = match serde_json::from_reader(file) {
+                Ok(value) => value,
+                Err(error) => {
+                    walk_error = Some(format!(
+                        "parse tile metadata {} failed: {error}",
+                        dir.display()
+                    ));
+                    return;
+                }
+            };
             let bv = &val["root"]["boundingVolume"];
             let box_arr = match bv["box"].as_array() {
                 Some(arr) => arr,
@@ -240,8 +277,15 @@ pub fn shape_batch_convert(
             let mut child = val["root"].clone();
             child["geometricError"] = json!(ge);
             json_vec.push(child);
-        })
-        .expect("walk_path failed!");
+        });
+        if let Err(error) = walk_result {
+            eprintln!("walk shape tiles failed: {error}");
+            return false;
+        }
+        if let Some(error) = walk_error {
+            eprintln!("{error}");
+            return false;
+        }
 
         let has_children = root_min[0].is_finite() && root_max[0].is_finite();
         let (root_box, root_ge) = if has_children {
@@ -262,9 +306,10 @@ pub fn shape_batch_convert(
             ([0.0_f64; 12], 0.0_f64)
         };
         {
-            let box_arr = tileset_json["root"]["boundingVolume"]["box"]
-                .as_array_mut()
-                .unwrap();
+            let Some(box_arr) = tileset_json["root"]["boundingVolume"]["box"].as_array_mut() else {
+                eprintln!("generated tileset root boundingVolume.box is not an array");
+                return false;
+            };
             for x in root_box {
                 box_arr.push(json!(x));
             }
@@ -274,7 +319,10 @@ pub fn shape_batch_convert(
             tileset_json["root"]["geometricError"] = json!(root_ge);
         }
         {
-            let children = tileset_json["root"]["children"].as_array_mut().unwrap();
+            let Some(children) = tileset_json["root"]["children"].as_array_mut() else {
+                eprintln!("generated tileset root children is not an array");
+                return false;
+            };
             for x in json_vec {
                 children.push(json!(x));
             }
@@ -282,13 +330,24 @@ pub fn shape_batch_convert(
 
         let dir_dest = Path::new(to);
         let path_json = dir_dest.join("tileset.json");
-        let mut f = File::create(path_json).unwrap();
-        f.write_all(
-            &serde_json::to_string_pretty(&tileset_json)
-                .unwrap()
-                .into_bytes(),
-        )
-        .unwrap();
+        let mut f = match File::create(&path_json) {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!("create {} failed: {error}", path_json.display());
+                return false;
+            }
+        };
+        let serialized = match serde_json::to_string_pretty(&tileset_json) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("serialize {} failed: {error}", path_json.display());
+                return false;
+            }
+        };
+        if let Err(error) = f.write_all(serialized.as_bytes()) {
+            eprintln!("write {} failed: {error}", path_json.display());
+            return false;
+        }
         true
     }
 }

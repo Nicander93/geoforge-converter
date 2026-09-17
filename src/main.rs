@@ -359,6 +359,20 @@ fn main() {
     }
 }
 
+fn runtime_cstring(name: &str) -> Result<std::ffi::CString, String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("cannot locate converter executable: {error}"))?;
+    let parent = exe
+        .parent()
+        .ok_or_else(|| "converter executable has no parent directory".to_string())?;
+    let path = parent.join(name);
+    let text = path
+        .to_str()
+        .ok_or_else(|| format!("runtime path is not valid UTF-8: {}", path.display()))?;
+    std::ffi::CString::new(text)
+        .map_err(|_| format!("runtime path contains NUL byte: {}", path.display()))
+}
+
 fn conversion_output_exists(format: &str, output: &str) -> bool {
     let path = std::path::Path::new(output);
     match format {
@@ -613,9 +627,9 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                 if v1.len() > 1 {
                                     let v1_num = (*v1[0]).parse::<f64>();
                                     let v2_num = v1[1].parse::<f64>();
-                                    if v1_num.is_ok() && v2_num.is_ok() {
-                                        center_y = v1_num.unwrap();
-                                        center_x = v2_num.unwrap();
+                                    if let (Ok(parsed_y), Ok(parsed_x)) = (v1_num, v2_num) {
+                                        center_y = parsed_y;
+                                        center_x = parsed_x;
 
                                         // Parse and apply SRSOrigin offset
                                         let origin_parts: Vec<&str> =
@@ -633,35 +647,24 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                                 };
 
                                                 // Call enu_init to set up GeoTransform for geometry correction
-                                                let gdal_data: String = {
-                                                    use std::path::Path;
-                                                    let exe_dir = ::std::env::current_exe().unwrap();
-                                                    Path::new(&exe_dir)
-                                                        .parent()
-                                                        .unwrap()
-                                                        .join("gdal")
-                                                        .to_str()
-                                                        .unwrap()
-                                                        .into()
+                                                let gdal_c_str = match runtime_cstring("gdal") {
+                                                    Ok(value) => value,
+                                                    Err(error) => {
+                                                        error!("ENU runtime setup failed: {error}");
+                                                        return;
+                                                    }
                                                 };
-                                                let proj_lib: String = {
-                                                    use std::path::Path;
-                                                    let exe_dir = ::std::env::current_exe().unwrap();
-                                                    Path::new(&exe_dir)
-                                                        .parent()
-                                                        .unwrap()
-                                                        .join("proj")
-                                                        .to_str()
-                                                        .unwrap()
-                                                        .into()
+                                                let proj_c_str = match runtime_cstring("proj") {
+                                                    Ok(value) => value,
+                                                    Err(error) => {
+                                                        error!("ENU runtime setup failed: {error}");
+                                                        return;
+                                                    }
                                                 };
 
                                                 unsafe {
-                                                    use std::ffi::CString;
                                                     let mut origin_enu = vec![offset_x, offset_y, offset_z];
-                                                    let gdal_c_str = CString::new(gdal_data).unwrap();
                                                     let gdal_ptr = gdal_c_str.as_ptr();
-                                                    let proj_c_str = CString::new(proj_lib).unwrap();
                                                     let proj_ptr = proj_c_str.as_ptr();
                                                     if !osgb::enu_init(center_x, center_y, origin_enu.as_mut_ptr(), gdal_ptr, proj_ptr) {
                                                         error!("enu_init failed!");
@@ -698,33 +701,22 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                         return;
                                     };
                                     if pt.len() >= 3 {
-                                        let gdal_data: String = {
-                                            use std::path::Path;
-                                            let exe_dir = ::std::env::current_exe().unwrap();
-                                            Path::new(&exe_dir)
-                                                .parent()
-                                                .unwrap()
-                                                .join("gdal")
-                                                .to_str()
-                                                .unwrap()
-                                                .into()
+                                        let gdal_c_str = match runtime_cstring("gdal") {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                error!("EPSG runtime setup failed: {error}");
+                                                return;
+                                            }
                                         };
-                                        let proj_lib: String = {
-                                            use std::path::Path;
-                                            let exe_dir = ::std::env::current_exe().unwrap();
-                                            Path::new(&exe_dir)
-                                                .parent()
-                                                .unwrap()
-                                                .join("proj")
-                                                .to_str()
-                                                .unwrap()
-                                                .into()
+                                        let proj_c_str = match runtime_cstring("proj") {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                error!("EPSG runtime setup failed: {error}");
+                                                return;
+                                            }
                                         };
                                         unsafe {
-                                            use std::ffi::CString;
-                                            let gdal_c_str = CString::new(gdal_data).unwrap();
                                             let gdal_ptr = gdal_c_str.as_ptr();
-                                            let proj_c_str = CString::new(proj_lib).unwrap();
                                             let proj_ptr = proj_c_str.as_ptr();
                                             if osgb::epsg_convert(srs, pt.as_mut_ptr(), gdal_ptr, proj_ptr) {
                                                 center_x = pt[0];
@@ -756,24 +748,24 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                 return;
                             };
                             if pt.len() >= 3 {
-                                let gdal_data: String = {
-                                    use std::path::Path;
-                                    let exe_dir = ::std::env::current_exe().unwrap();
-                                    Path::new(&exe_dir)
-                                        .parent()
-                                        .unwrap()
-                                        .join("gdal_data")
-                                        .to_str()
-                                        .unwrap()
-                                        .into()
+                                let gdal_c_str = match runtime_cstring("gdal_data") {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        error!("WKT runtime setup failed: {error}");
+                                        return;
+                                    }
                                 };
                                 unsafe {
-                                    use std::ffi::CString;
                                     let wkt: String = metadata.SRS;
                                     // println!("{:?}", wkt);
-                                    let c_str = CString::new(gdal_data).unwrap();
-                                    let ptr = c_str.as_ptr();
-                                    let wkt_cstr = CString::new(wkt).unwrap();
+                                    let ptr = gdal_c_str.as_ptr();
+                                    let wkt_cstr = match std::ffi::CString::new(wkt) {
+                                        Ok(value) => value,
+                                        Err(_) => {
+                                            error!("WKT contains a NUL byte");
+                                            return;
+                                        }
+                                    };
                                     let wkt_ptr = wkt_cstr.as_ptr();
                                     if osgb::wkt_convert(wkt_ptr, pt.as_mut_ptr(), ptr) {
                                         center_x = pt[0];
@@ -825,7 +817,7 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
         unsafe { fun_c::cleanup_global_resources(); }
         return;
     }
-    let elap_sec = tick.elapsed().unwrap();
+    let elap_sec = tick.elapsed().unwrap_or_default();
     let tick_num = elap_sec.as_secs() as f64 + elap_sec.subsec_nanos() as f64 * 1e-9;
     info!("task over, cost {:.2} s.", tick_num);
     unsafe { fun_c::cleanup_global_resources(); }
@@ -856,7 +848,7 @@ fn convert_shapefile(
     if !ret {
         error!("convert shapefile failed");
     } else {
-        let elap_sec = tick.elapsed().unwrap();
+        let elap_sec = tick.elapsed().unwrap_or_default();
         let tick_num = elap_sec.as_secs() as f64 + elap_sec.subsec_nanos() as f64 * 1e-9;
         info!("task over, cost {:.2} s.", tick_num);
     }
