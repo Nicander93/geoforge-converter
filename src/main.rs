@@ -311,7 +311,17 @@ fn main() {
 
     match format {
         "osgb" => {
-            convert_osgb(&input, output, tile_config, enable_simplify, enable_texture_compress, enable_draco, enable_unlit);
+            if !convert_osgb(
+                &input,
+                output,
+                tile_config,
+                enable_simplify,
+                enable_texture_compress,
+                enable_draco,
+                enable_unlit,
+            ) {
+                std::process::exit(1);
+            }
         }
         "shape" => {
             convert_shapefile(
@@ -589,7 +599,7 @@ fn parse_origin_values(value: &str) -> Option<Vec<f64>> {
     Some(values)
 }
 
-fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enable_texture_compress: bool, enable_draco: bool, enable_unlit: bool) {
+fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enable_texture_compress: bool, enable_draco: bool, enable_unlit: bool) -> bool {
     use serde_json::Value;
     use std::fs::File;
     use std::io::prelude::*;
@@ -641,7 +651,13 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                             ) {
                                                 // Parse Z offset (height) if available
                                                 let offset_z = if origin_parts.len() >= 3 {
-                                                    origin_parts[2].parse::<f64>().unwrap_or(0.0)
+                                                    match origin_parts[2].parse::<f64>() {
+                                                        Ok(value) => value,
+                                                        Err(_) => {
+                                                            error!("OSGB_ENU_ORIGIN_INVALID: SRSOrigin z is not numeric");
+                                                            return false;
+                                                        }
+                                                    }
                                                 } else {
                                                     0.0
                                                 };
@@ -651,14 +667,14 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                                     Ok(value) => value,
                                                     Err(error) => {
                                                         error!("ENU runtime setup failed: {error}");
-                                                        return;
+                                                        return false;
                                                     }
                                                 };
                                                 let proj_c_str = match runtime_cstring("proj") {
                                                     Ok(value) => value,
                                                     Err(error) => {
                                                         error!("ENU runtime setup failed: {error}");
-                                                        return;
+                                                        return false;
                                                     }
                                                 };
 
@@ -667,7 +683,8 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                                     let gdal_ptr = gdal_c_str.as_ptr();
                                                     let proj_ptr = proj_c_str.as_ptr();
                                                     if !osgb::enu_init(center_x, center_y, origin_enu.as_mut_ptr(), gdal_ptr, proj_ptr) {
-                                                        error!("enu_init failed!");
+                                                        error!("OSGB_ENU_INIT_FAILED: enu_init failed for SRSOrigin {offset_x},{offset_y},{offset_z}");
+                                                        return false;
                                                     }
                                                 }
 
@@ -682,37 +699,41 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                                 info!("ENU SRSOrigin offset detected: x={}, y={}, z={}", offset_x, offset_y, offset_z);
                                                 info!("Using geographic origin for transform: lon={}, lat={}, h={}", center_x, center_y, geo_origin_height);
                                             } else {
-                                                error!("Failed to parse SRSOrigin values");
+                                                error!("OSGB_ENU_ORIGIN_INVALID: failed to parse SRSOrigin values");
+                                                return false;
                                             }
                                         } else {
-                                            error!("SRSOrigin format invalid, expected x,y,z");
+                                            error!("OSGB_ENU_ORIGIN_INVALID: SRSOrigin must contain x,y,z");
+                                            return false;
                                         }
                                     } else {
-                                        error!("parse ENU point error");
+                                        error!("OSGB_ENU_SRS_INVALID: ENU longitude/latitude is not numeric");
+                                        return false;
                                     }
                                 } else {
-                                    error!("ENU point is not enough");
+                                    error!("OSGB_ENU_SRS_INVALID: ENU SRS must contain latitude and longitude");
+                                    return false;
                                 }
                             } else if v[0] == "EPSG" {
                                 // call gdal to convert
                                 if let Ok(srs) = v[1].parse::<i32>() {
                                     let Some(mut pt) = parse_origin_values(&metadata.SRSOrigin) else {
                                         error!("SRSOrigin contains a non-numeric value");
-                                        return;
+                                        return false;
                                     };
                                     if pt.len() >= 3 {
                                         let gdal_c_str = match runtime_cstring("gdal") {
                                             Ok(value) => value,
                                             Err(error) => {
                                                 error!("EPSG runtime setup failed: {error}");
-                                                return;
+                                                return false;
                                             }
                                         };
                                         let proj_c_str = match runtime_cstring("proj") {
                                             Ok(value) => value,
                                             Err(error) => {
                                                 error!("EPSG runtime setup failed: {error}");
-                                                return;
+                                                return false;
                                             }
                                         };
                                         unsafe {
@@ -727,32 +748,36 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                                 origin_height = Some(geo_origin_height);
                                                 info!("epsg: x->{}, y->{}, h={} (geoid-corrected from original h={})", pt[0], pt[1], geo_origin_height, pt[2]);
                                             } else {
-                                                error!("epsg convert failed!");
+                                                error!("OSGB_EPSG_TRANSFORM_FAILED: EPSG:{srs} origin conversion failed");
+                                                return false;
                                             }
                                         }
                                     } else {
-                                        error!("epsg point is not enough");
+                                        error!("OSGB_EPSG_ORIGIN_INVALID: SRSOrigin must contain x,y,z");
+                                        return false;
                                     }
                                 } else {
-                                    error!("parse EPSG failed");
+                                    error!("OSGB_EPSG_SRS_INVALID: EPSG code is not numeric");
+                                    return false;
                                 }
                             //
                             } else {
-                                error!("EPSG or ENU is expected in SRS");
+                                error!("OSGB_SRS_INVALID: expected EPSG or ENU SRS");
+                                return false;
                             }
                         } else {
                             // error!("SRS content error");
                             // treat as wkt
                             let Some(mut pt) = parse_origin_values(&metadata.SRSOrigin) else {
                                 error!("SRSOrigin contains a non-numeric value");
-                                return;
+                                return false;
                             };
                             if pt.len() >= 3 {
                                 let gdal_c_str = match runtime_cstring("gdal_data") {
                                     Ok(value) => value,
                                     Err(error) => {
                                         error!("WKT runtime setup failed: {error}");
-                                        return;
+                                        return false;
                                     }
                                 };
                                 unsafe {
@@ -763,7 +788,7 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                         Ok(value) => value,
                                         Err(_) => {
                                             error!("WKT contains a NUL byte");
-                                            return;
+                                            return false;
                                         }
                                     };
                                     let wkt_ptr = wkt_cstr.as_ptr();
@@ -772,24 +797,32 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                         center_y = pt[1];
                                         info!("wkt: x->{}, y->{}", pt[0], pt[1]);
                                     } else {
-                                        error!("wkt convert failed!");
+                                        error!("OSGB_WKT_TRANSFORM_FAILED: WKT origin conversion failed");
+                                        return false;
                                     }
                                 }
+                            } else {
+                                error!("OSGB_WKT_ORIGIN_INVALID: SRSOrigin must contain x,y,z");
+                                return false;
                             }
                         }
                     }
                     Err(e) => {
-                        error!("parse metadata.xml error: {}", e);
+                        error!("OSGB_METADATA_INVALID: parse metadata.xml error: {}", e);
+                        return false;
                     }
                 }
             } else {
-                error!("read {} failed", metadata_file.display());
+                error!("OSGB_METADATA_READ_FAILED: read {} failed", metadata_file.display());
+                return false;
             }
         } else {
-            error!("open {} failed", metadata_file.display());
+            error!("OSGB_METADATA_READ_FAILED: open {} failed", metadata_file.display());
+            return false;
         }
     } else {
-        error!("{} is missing", metadata_file.display());
+        error!("OSGB_METADATA_MISSING: {} is missing", metadata_file.display());
+        return false;
     }
     if let Ok(v) = serde_json::from_str::<Value>(config) {
         if let Some(x) = v["x"].as_f64() {
@@ -805,7 +838,9 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
             max_lvl = Some(lvl as i32);
         }
     } else if config.len() > 0 {
-        error!("config error --> {}", config);
+        error!("OSGB_CONFIG_INVALID: config is not valid JSON: {}", config);
+        unsafe { fun_c::cleanup_global_resources(); }
+        return false;
     }
     let tick = time::SystemTime::now();
     if let Err(e) = osgb::osgb_batch_convert(
@@ -815,12 +850,13 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
     {
         error!("{}", e);
         unsafe { fun_c::cleanup_global_resources(); }
-        return;
+        return false;
     }
     let elap_sec = tick.elapsed().unwrap_or_default();
     let tick_num = elap_sec.as_secs() as f64 + elap_sec.subsec_nanos() as f64 * 1e-9;
     info!("task over, cost {:.2} s.", tick_num);
     unsafe { fun_c::cleanup_global_resources(); }
+    true
 }
 
 fn convert_shapefile(
