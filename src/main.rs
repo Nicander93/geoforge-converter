@@ -305,9 +305,18 @@ fn main() {
         error!("{} does not exists.", input);
         std::process::exit(2);
     }
-    // Canonicalize path to ensure absolute paths for C++ loader
-    let abs_input_buf = in_path.canonicalize().unwrap_or(in_path.to_path_buf());
-    let input = abs_input_buf.to_string_lossy();
+    // Keep an already-absolute Windows path in its normal UTF-8 form.  The
+    // Windows canonicalize implementation may add the `\\?\` extended-path
+    // prefix; the bundled OSG UTF-8 loader handles ordinary absolute paths
+    // reliably, while that prefix can be reinterpreted by older OSG plugins.
+    // Relative paths still get canonicalized so the native layer receives a
+    // stable absolute path.
+    let input_path = if in_path.is_absolute() {
+        in_path.to_path_buf()
+    } else {
+        in_path.canonicalize().unwrap_or(in_path.to_path_buf())
+    };
+    let input = input_path.to_string_lossy();
 
     match format {
         "osgb" => {
