@@ -17,6 +17,7 @@ extern "C" {
         longitude: f64,
         latitude: f64,
         height: f64,
+        has_georeference: bool,
     ) -> *mut libc::c_void;
 }
 
@@ -31,6 +32,7 @@ pub fn convert_fbx(
     longitude: f64,
     latitude: f64,
     height: f64,
+    has_georeference: bool,
 ) -> Result<(), Box<dyn Error>> {
     let in_path = str_to_vec_c(in_file);
     let out_path = str_to_vec_c(out_dir);
@@ -56,6 +58,7 @@ pub fn convert_fbx(
             longitude,
             latitude,
             height,
+            has_georeference,
         );
 
         if out_ptr.is_null() {

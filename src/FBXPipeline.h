@@ -33,6 +33,7 @@ struct PipelineSettings {
     double longitude = 0.0;
     double latitude = 0.0;
     double height = 0.0;
+    bool hasGeoreference = false;
 
     // Geometric error scale (multiplier applied to boundingVolume diagonal)
     double geScale = 0.5; // Adjusted for better LOD switching with SSE=16
@@ -51,7 +52,7 @@ public:
     FBXPipeline(const PipelineSettings& settings);
     ~FBXPipeline();
 
-    void run();
+    bool run();
 
 private:
     PipelineSettings settings;

@@ -82,9 +82,9 @@ void CoordinateTransformer::InitializeWithGeoRef(const GeoReference& geo_ref) {
         // EPSG/WKT类型：创建OGR转换器用于后续坐标转换
         CreateOGRTransform();
 
-        // 使用传入的地理参考（已经过Geoid校正）
-        // 如果传入的geo_ref有效（非零），使用它；否则自己计算
-        if (geo_ref.lon != 0.0 || geo_ref.lat != 0.0) {
+        // A zero longitude/latitude anchor is valid. Presence is a separate
+        // part of the contract so origin coordinates do not change behavior.
+        if (geo_ref.has_position) {
             geo_origin_lon_ = geo_ref.lon;
             geo_origin_lat_ = geo_ref.lat;
             geo_origin_height_ = geo_ref.height;

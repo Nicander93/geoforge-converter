@@ -43,10 +43,11 @@ struct GeoReference {
     double lat;                                     // 纬度(度)
     double height;                                  // 高度(米)
     VerticalDatum datum = VerticalDatum::Ellipsoidal;  // 高程基准
+    bool has_position = false;                      // Zero longitude/latitude is valid
 
     static GeoReference FromDegrees(double lon, double lat, double height,
                                     VerticalDatum datum = VerticalDatum::Ellipsoidal) {
-        return {lon, lat, height, datum};
+        return {lon, lat, height, datum, true};
     }
 };
 
@@ -77,7 +78,7 @@ struct ENUParams {
 
     // 获取ENU原点的地理参考
     GeoReference GetGeoReference() const {
-        return {origin_lon, origin_lat, origin_height, VerticalDatum::Ellipsoidal};
+        return {origin_lon, origin_lat, origin_height, VerticalDatum::Ellipsoidal, true};
     }
 };
 

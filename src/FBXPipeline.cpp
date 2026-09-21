@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
+#include <exception>
 #include <map>
 #include <set>
 
@@ -67,11 +68,14 @@ FBXPipeline::~FBXPipeline() {
     if (rootNode) delete rootNode;
 }
 
-void FBXPipeline::run() {
+bool FBXPipeline::run() {
     LOG_I("Starting FBXPipeline...");
 
     loader = new FBXLoader(settings.inputPath);
-    loader->load();
+    if (!loader->load()) {
+        LOG_E("FBX import failed; pipeline will not write a tileset");
+        return false;
+    }
     LOG_I("FBX Loaded. Mesh Pool Size: %zu", loader->meshPool.size());
     {
         auto stats = loader->getStats();
@@ -128,7 +132,7 @@ void FBXPipeline::run() {
 
     rootNode = new OctreeNode();
 
-    // --- 1. Pre-pass: Detect Outliers ---
+    // --- 1. Pre-pass: collect scene bounds ---
     osg::Vec3d centroid(0,0,0);
     size_t totalInstanceCount = 0;
 
@@ -245,7 +249,7 @@ void FBXPipeline::run() {
 
     // --- 2. Main Pass: Build Root Node & Filter ---
     osg::BoundingBox globalBounds;
-    size_t skippedCount = 0;
+    size_t outlierWarningCount = 0;
 
     for (auto& pair : loader->meshPool) {
         MeshInstanceInfo& info = pair.second;
@@ -255,16 +259,17 @@ void FBXPipeline::run() {
         for (size_t i = 0; i < info.transforms.size(); ++i) {
             const auto& mat = info.transforms[i];
 
-            // Outlier Check
+            // Large model extents are valid for campuses and infrastructure.
+            // Keep every instance by default and make suspicious distances
+            // diagnosable instead of silently deleting source content.
             if (hasOutliers) {
                 osg::Vec3d instCenter = geomBox.center() * mat;
                 double d = (instCenter - centroid).length();
                 if (d > outlierThreshold) {
                     std::string name = (i < info.nodeNames.size()) ? info.nodeNames[i] : "unknown";
-                    LOG_W("Filtering Outlier: '%s' Dist=%.2f Pos=(%.2f, %.2f, %.2f)",
+                    LOG_W("Possible outlier retained: '%s' Dist=%.2f Pos=(%.2f, %.2f, %.2f)",
                           name.c_str(), d, instCenter.x(), instCenter.y(), instCenter.z());
-                    skippedCount++;
-                    continue; // SKIP this instance
+                    outlierWarningCount++;
                 }
             }
 
@@ -281,8 +286,8 @@ void FBXPipeline::run() {
         }
     }
 
-    if (skippedCount > 0) {
-        LOG_I("Filtered %zu outlier instances.", skippedCount);
+    if (outlierWarningCount > 0) {
+        LOG_W("Retained %zu possible outlier instances.", outlierWarningCount);
     }
     rootNode->bbox = globalBounds;
 
@@ -324,6 +329,7 @@ void FBXPipeline::run() {
         LOG_I("Mesh dedup: geometries_created=%d reused_by_hash=%d mesh_cache_hit_count=%d unique_geometries=%zu",
               stats.geometry_created, stats.geometry_hash_reused, stats.mesh_cache_hit_count, stats.unique_geometries);
     }
+    return true;
 }
 
 void FBXPipeline::buildOctree(OctreeNode* node) {
@@ -2237,7 +2243,7 @@ void FBXPipeline::writeTilesetJson(const std::string& basePath, const osg::Bound
     }
 
     // Always add Transform to anchor local ENU coordinates to ECEF
-    if (settings.longitude != 0.0 || settings.latitude != 0.0 || settings.height != 0.0) {
+    if (settings.hasGeoreference) {
         glm::dmat4 enuToEcef = coords::CoordinateTransformer::CalcEnuToEcefMatrix(settings.longitude, settings.latitude, settings.height);
 
         // Calculate center of the model (in original local coordinates - Y-up from FBX)
@@ -2448,7 +2454,8 @@ extern "C" void* fbx23dtile(
     bool enable_unlit,
     double longitude,
     double latitude,
-    double height
+    double height,
+    bool has_georeference
 ) {
     std::string input(in_path);
     std::string output(out_path);
@@ -2465,9 +2472,20 @@ extern "C" void* fbx23dtile(
     settings.longitude = longitude;
     settings.latitude = latitude;
     settings.height = height;
+    settings.hasGeoreference = has_georeference;
 
-    FBXPipeline pipeline(settings);
-    pipeline.run();
+    try {
+        FBXPipeline pipeline(settings);
+        if (!pipeline.run()) {
+            return nullptr;
+        }
+    } catch (const std::exception& error) {
+        LOG_E("FBX pipeline failed: %s", error.what());
+        return nullptr;
+    } catch (...) {
+        LOG_E("FBX pipeline failed with an unknown native exception");
+        return nullptr;
+    }
 
     fs::path tilesetPath = fs::path(output) / "tileset.json";
     if (!fs::exists(tilesetPath)) {

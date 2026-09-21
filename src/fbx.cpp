@@ -188,14 +188,6 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
         return it->second.get();
     }
 
-    std::string matHash = calcMaterialHash(mat);
-    auto hit = materialHashCache.find(matHash);
-    if (hit != materialHashCache.end()) {
-        materialCache[mat] = hit->second;
-        material_reused_hash_count++;
-        return hit->second.get();
-    }
-
     osg::StateSet* stateSet = new osg::StateSet;
     osg::Material* material = new osg::Material;
 
@@ -304,7 +296,10 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
     }
     const ufbx_texture* ntex = NULL;
     if (mat->pbr.normal_map.texture) ntex = mat->pbr.normal_map.texture;
-    else if (mat->fbx.bump.texture) ntex = mat->fbx.bump.texture;
+    if (!ntex && mat->fbx.bump.texture) {
+        LOG_W("Material '%s' uses a bump-height texture; it is not emitted as a normal map. Bake it to a tangent-space normal map before conversion.",
+              mat->name.data ? mat->name.data : "(unnamed)");
+    }
     if (ntex) {
         osg::ref_ptr<osg::Image> image;
         if (ntex->content.data && ntex->content.size > 0) {
@@ -498,7 +493,6 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
     stateSet->addUniform(new osg::Uniform("metallicFactor", metallic));
 
     materialCache[mat] = stateSet;
-    materialHashCache[matHash] = stateSet;
     material_created_count++;
     return stateSet;
 }
@@ -520,7 +514,7 @@ FBXLoader::DedupStats FBXLoader::getStats() const {
   s.geometry_created = geometry_created_count;
   s.geometry_hash_reused = geometry_reused_hash_count;
   s.mesh_cache_hit_count = mesh_cache_hit_count;
-  s.unique_statesets = materialHashCache.size();
+  s.unique_statesets = materialCache.size();
   s.unique_geometries = geometryHashCache.size();
   return s;
 }
@@ -529,6 +523,11 @@ std::string FBXLoader::calcMeshHash(const ufbx_mesh *mesh) {
   if (!mesh) return "0";
   // Only hash vertices/indices/faces count
   std::ostringstream oss;
+
+  // Do not merge distinct source materials until every emitted property and
+  // texture semantic participates in a stable hash. A pointer-based identity
+  // keeps mesh grouping correct while still allowing exact source reuse.
+  oss << "material@" << static_cast<const void*>(mat);
   oss.write((const char*)mesh->vertices.data, mesh->vertices.count * sizeof(ufbx_vec3));
   oss.write((const char*)mesh->vertex_indices.data, mesh->vertex_indices.count * sizeof(uint32_t));
   oss.write((const char*)mesh->faces.data, mesh->faces.count * sizeof(ufbx_face));
@@ -637,7 +636,7 @@ std::unordered_map<std::string, std::string> FBXLoader::collectNodeAttrs(const u
   return attrs;
 }
 
-void FBXLoader::load() {
+bool FBXLoader::load() {
     ufbx_load_opts opts = {};
     opts.target_axes = ufbx_axes_right_handed_y_up; // Convert to glTF/OpenGL standard (Y-up)
     opts.target_unit_meters = 1.0f; // Force output unit to be Meters (Cesium standard)
@@ -652,7 +651,7 @@ void FBXLoader::load() {
     scene = ufbx_load_file(source_filename.c_str(), &opts, &error);
     if (!scene) {
         LOG_E("Failed to load FBX: %s", error.description.data);
-        return;
+        return false;
     }
 
     // Log settings for debugging (metadata often contains the original file info)
@@ -692,6 +691,11 @@ void FBXLoader::load() {
           material_created_count, material_reused_hash_count, material_reused_ptr_count, materialHashCache.size());
     LOG_I("Mesh dedup: geometries_created=%d reused_by_hash=%d mesh_cache_hits=%d unique_geometries=%zu",
           geometry_created_count, geometry_reused_hash_count, mesh_cache_hit_count, geometryHashCache.size());
+    if (meshPool.empty()) {
+        LOG_E("FBX contains no visible triangle meshes: %s", source_filename.c_str());
+        return false;
+    }
+    return true;
 }
 
 osg::ref_ptr<osg::Node> FBXLoader::loadNode(ufbx_node *node, const osg::Matrixd &parentXform) {

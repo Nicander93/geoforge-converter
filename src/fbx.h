@@ -37,7 +37,9 @@ public:
     FBXLoader(const std::string &filename);
     ~FBXLoader();
 
-    void load();
+    // A false return means the source could not be imported. Callers must not
+    // continue and emit an empty tileset after this boundary.
+    bool load();
 
     osg::ref_ptr<osg::Node> getRoot() const { return _root; }
 

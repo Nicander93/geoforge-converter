@@ -22,6 +22,88 @@ use log::LevelFilter;
 use serde::Deserialize;
 use std::io::Write;
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelConfig {
+    #[serde(default = "default_model_config_version")]
+    version: u32,
+    model: ModelImportConfig,
+    #[serde(default)]
+    georeference: ModelGeoreference,
+    #[serde(default)]
+    texture: serde_json::Value,
+    #[serde(default, rename = "modelOutput")]
+    model_output: serde_json::Value,
+}
+
+fn default_model_config_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelImportConfig {
+    format: String,
+    unit: String,
+    axes: String,
+    #[serde(default, rename = "missingTexturePolicy")]
+    missing_texture_policy: Option<String>,
+    #[serde(default, rename = "textureRoots")]
+    texture_roots: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+enum ModelGeoreference {
+    Local,
+    Anchor {
+        #[serde(rename = "longitudeDeg")]
+        longitude_deg: f64,
+        #[serde(rename = "latitudeDeg")]
+        latitude_deg: f64,
+        #[serde(rename = "ellipsoidHeightM")]
+        ellipsoid_height_m: f64,
+    },
+    Projected {
+        #[serde(rename = "sourceCrs")]
+        source_crs: String,
+    },
+}
+
+impl Default for ModelGeoreference {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+fn read_model_config(path: &str, format: &str) -> Result<ModelConfig, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read model config {path}: {error}"))?;
+    let config: ModelConfig = serde_json::from_str(&text)
+        .map_err(|error| format!("invalid model config {path}: {error}"))?;
+    if config.version != 1 {
+        return Err(format!("unsupported model config version {}", config.version));
+    }
+    if !config.model.format.eq_ignore_ascii_case(format) {
+        return Err(format!(
+            "model config format {} does not match --format {format}",
+            config.model.format
+        ));
+    }
+    if config.model.unit == "fromMetadata" && format.eq_ignore_ascii_case("obj") {
+        return Err("OBJ model config requires an explicit unit".into());
+    }
+    if config.model.axes == "fromMetadata" && format.eq_ignore_ascii_case("obj") {
+        return Err("OBJ model config requires explicit axes".into());
+    }
+    if let ModelGeoreference::Projected { source_crs } = &config.georeference {
+        if source_crs.trim().is_empty() {
+            return Err("projected model config requires sourceCrs".into());
+        }
+    }
+    Ok(config)
+}
+
 /// Setup OpenSceneGraph environment variables for plugin loading
 fn setup_osg_environment() {
     use std::env;
@@ -120,10 +202,10 @@ fn main() {
             Arg::new("format")
                 .short('f')
                 .long("format")
-                .value_name("osgb,shape,gltf,b3dm,fbx")
+                .value_name("osgb,shape,gltf,b3dm,fbx,obj")
                 .help("Set input format (required for convert)")
                 .required(false)
-                .value_parser(["osgb", "shape", "gltf", "b3dm", "fbx"])
+                .value_parser(["osgb", "shape", "gltf", "b3dm", "fbx", "obj"])
                 .num_args(1),
         )
         .arg(
@@ -141,6 +223,19 @@ fn main() {
 }",
                 )
                 .num_args(1),
+        )
+        .arg(
+            Arg::new("model-config")
+                .long("model-config")
+                .value_name("FILE")
+                .help("Versioned FBX/OBJ import and georeference configuration")
+                .num_args(1),
+        )
+        .arg(
+            Arg::new("capabilities-json")
+                .long("capabilities-json")
+                .help("Print machine-readable converter capabilities and exit")
+                .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("height")
@@ -218,6 +313,20 @@ fn main() {
         )
         .get_matches();
 
+    if matches.get_flag("capabilities-json") {
+        println!(
+            "{}",
+            serde_json::json!({
+                "version": 1,
+                "formats": ["fbx", "obj"],
+                "modelConfigVersion": 1,
+                "georeferenceModes": ["local", "anchor"],
+                "projectedGeoreference": false,
+            })
+        );
+        return;
+    }
+
     let input = match matches.get_one::<String>("input") {
         Some(s) => s.as_str(),
         None => {
@@ -243,6 +352,17 @@ fn main() {
         .get_one::<String>("config")
         .map(|s| s.as_str())
         .unwrap_or("");
+    let model_config = matches
+        .get_one::<String>("model-config")
+        .map(|path| read_model_config(path, format))
+        .transpose();
+    let model_config = match model_config {
+        Ok(config) => config,
+        Err(error) => {
+            error!("{error}");
+            std::process::exit(2);
+        }
+    };
     let height_field = matches
         .get_one::<String>("height")
         .map(|s| s.as_str())
@@ -348,11 +468,13 @@ fn main() {
         "b3dm" => {
             convert_b3dm(&input, output);
         }
-        "fbx" => {
-            convert_fbx_cmd(
+        "fbx" | "obj" => {
+            if let Err(error) = convert_model_cmd(
+                format,
                 &input,
                 output,
                 tile_config,
+                model_config.as_ref(),
                 enable_texture_compress,
                 enable_simplify,
                 enable_draco,
@@ -361,7 +483,10 @@ fn main() {
                 lat_val,
                 lon_val,
                 alt_val,
-            );
+            ) {
+                error!("FBX conversion failed: {error}");
+                std::process::exit(1);
+            }
         }
         _ => {
             error!("not support now.");
@@ -395,16 +520,18 @@ fn runtime_cstring(name: &str) -> Result<std::ffi::CString, String> {
 fn conversion_output_exists(format: &str, output: &str) -> bool {
     let path = std::path::Path::new(output);
     match format {
-        "osgb" | "shape" | "fbx" => path.join("tileset.json").is_file(),
+        "osgb" | "shape" | "fbx" | "obj" => path.join("tileset.json").is_file(),
         "gltf" | "b3dm" => path.is_file(),
         _ => false,
     }
 }
 
-fn convert_fbx_cmd(
+fn convert_model_cmd(
+    format: &str,
     input: &str,
     output: &str,
     config: &str,
+    model_config: Option<&ModelConfig>,
     enable_texture_compress: bool,
     enable_simplify: bool,
     enable_draco: bool,
@@ -413,14 +540,36 @@ fn convert_fbx_cmd(
     lat: Option<f64>,
     lon: Option<f64>,
     height: Option<f64>,
-) {
+) -> Result<(), String> {
     use serde_json::Value;
+
+    validate_model_input(format, input)?;
 
     let mut max_lvl: Option<i32> = None;
     // Default to CLI args, or 0.0
     let mut longitude = lon.unwrap_or(0.0);
     let mut latitude = lat.unwrap_or(0.0);
     let mut height_f = height.unwrap_or(0.0);
+    let mut has_georeference = lon.is_some() || lat.is_some() || height.is_some();
+
+    if let Some(model_config) = model_config {
+        match &model_config.georeference {
+            ModelGeoreference::Local => {}
+            ModelGeoreference::Anchor {
+                longitude_deg,
+                latitude_deg,
+                ellipsoid_height_m,
+            } => {
+                longitude = *longitude_deg;
+                latitude = *latitude_deg;
+                height_f = *ellipsoid_height_m;
+                has_georeference = true;
+            }
+            ModelGeoreference::Projected { .. } => {
+                return Err("projected model georeference is not implemented by this converter build".into());
+            }
+        }
+    }
 
     if !config.is_empty() {
         if let Ok(val) = serde_json::from_str::<Value>(config) {
@@ -431,32 +580,36 @@ fn convert_fbx_cmd(
             if lon.is_none() {
                 if let Some(x) = val["x"].as_f64() {
                     longitude = x;
+                    has_georeference = true;
                 }
             }
             if lat.is_none() {
                 if let Some(y) = val["y"].as_f64() {
                     latitude = y;
+                    has_georeference = true;
                 }
             }
             if height.is_none() {
                 if let Some(h) = val["height"].as_f64() {
                     height_f = h;
+                    has_georeference = true;
                 } else if let Some(offset) = val["offset"].as_f64() {
                     height_f = offset;
+                    has_georeference = true;
                 }
             }
         } else {
-            error!("config is not valid json");
+            return Err("config is not valid JSON".into());
         }
     }
 
-    info!("Starting FBX conversion: {} -> {}", input, output);
+    info!("Starting {} conversion: {} -> {}", format.to_uppercase(), input, output);
     info!("Origin: lon={}, lat={}, height={}", longitude, latitude, height_f);
     if enable_lod {
-        warn!("LOD is not supported for FBX; flag will be ignored");
+        warn!("LOD is not supported for {format}; flag will be ignored");
     }
 
-    if let Err(e) = fbx::convert_fbx(
+    fbx::convert_fbx(
         input,
         output,
         max_lvl,
@@ -467,10 +620,78 @@ fn convert_fbx_cmd(
         longitude,
         latitude,
         height_f,
-    ) {
-        error!("FBX conversion failed: {}", e);
-    } else {
-        info!("FBX conversion finished successfully.");
+        has_georeference,
+    )
+    .map_err(|error| error.to_string())?;
+    info!("FBX conversion finished successfully.");
+    Ok(())
+}
+
+fn validate_model_input(format: &str, input: &str) -> Result<(), String> {
+    let expected_extension = match format {
+        "fbx" => "fbx",
+        "obj" => "obj",
+        _ => return Err(format!("unsupported model format: {format}")),
+    };
+    let extension = std::path::Path::new(input)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if extension.eq_ignore_ascii_case(expected_extension) {
+        return Ok(());
+    }
+    Err(format!(
+        "--format {format} requires a .{expected_extension} input, got: {input}"
+    ))
+}
+
+#[cfg(test)]
+mod model_config_tests {
+    use super::{ModelConfig, ModelGeoreference};
+
+    #[test]
+    fn accepts_processor_model_config_shape() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "model": {
+                "format": "obj",
+                "unit": "meters",
+                "axes": "zUpRightHanded",
+                "missingTexturePolicy": "error",
+                "textureRoots": ["D:/models/textures"]
+              },
+              "georeference": {
+                "mode": "anchor",
+                "longitudeDeg": 0,
+                "latitudeDeg": 0,
+                "ellipsoidHeightM": 0
+              },
+              "texture": { "mode": "keep" },
+              "modelOutput": { "format": "3dtiles-1.0", "tiling": "single", "lod": false }
+            }"#,
+        )
+        .expect("processor config parses");
+        assert_eq!(config.version, 1);
+        assert_eq!(config.model.texture_roots.len(), 1);
+        assert!(matches!(config.georeference, ModelGeoreference::Anchor { .. }));
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::validate_model_input;
+
+    #[test]
+    fn accepts_model_format_matching_input_extension() {
+        assert!(validate_model_input("fbx", "C:/模型/建筑.FBX").is_ok());
+        assert!(validate_model_input("obj", "C:/模型/设备.obj").is_ok());
+    }
+
+    #[test]
+    fn rejects_model_format_mismatch() {
+        let error = validate_model_input("obj", "C:/模型/建筑.fbx").unwrap_err();
+        assert!(error.contains("requires a .obj"));
     }
 }
 
