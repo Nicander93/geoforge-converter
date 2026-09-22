@@ -69,6 +69,10 @@ public:
 
     // 是否有地理参考
     bool HasGeoReference() const { return mode_ == TransformMode::WithGeoReference; }
+    bool HasProjectedTransform() const {
+        return source_cs_.NeedsOGRTransform() && ogr_transform_ != nullptr;
+    }
+    glm::dvec3 GeoOrigin() const { return {geo_origin_lon_, geo_origin_lat_, geo_origin_height_}; }
 
     // ----- 坐标转换（仅HasGeoReference时有效）-----
 

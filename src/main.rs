@@ -67,7 +67,18 @@ enum ModelGeoreference {
     Projected {
         #[serde(rename = "sourceCrs")]
         source_crs: String,
+        #[serde(rename = "axisMapping")]
+        axis_mapping: ProjectedAxisMapping,
+        #[serde(rename = "originOffset", default)]
+        origin_offset: [f64; 3],
     },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ProjectedAxisMapping {
+    EastNorthHeight,
+    NorthEastHeight,
 }
 
 impl Default for ModelGeoreference {
@@ -96,7 +107,7 @@ fn read_model_config(path: &str, format: &str) -> Result<ModelConfig, String> {
     if config.model.axes == "fromMetadata" && format.eq_ignore_ascii_case("obj") {
         return Err("OBJ model config requires explicit axes".into());
     }
-    if let ModelGeoreference::Projected { source_crs } = &config.georeference {
+    if let ModelGeoreference::Projected { source_crs, .. } = &config.georeference {
         if source_crs.trim().is_empty() {
             return Err("projected model config requires sourceCrs".into());
         }
@@ -320,8 +331,8 @@ fn main() {
                 "version": 1,
                 "formats": ["fbx", "obj"],
                 "modelConfigVersion": 1,
-                "georeferenceModes": ["local", "anchor"],
-                "projectedGeoreference": false,
+                "georeferenceModes": ["local", "anchor", "projected"],
+                "projectedGeoreference": true,
             })
         );
         return;
@@ -565,8 +576,26 @@ fn convert_model_cmd(
                 height_f = *ellipsoid_height_m;
                 has_georeference = true;
             }
-            ModelGeoreference::Projected { .. } => {
-                return Err("projected model georeference is not implemented by this converter build".into());
+            ModelGeoreference::Projected {
+                source_crs,
+                axis_mapping,
+                origin_offset,
+            } => {
+                fbx::convert_fbx_projected(
+                    input,
+                    output,
+                    max_lvl,
+                    enable_texture_compress,
+                    enable_simplify,
+                    enable_draco,
+                    enable_unlit,
+                    source_crs,
+                    matches!(axis_mapping, ProjectedAxisMapping::NorthEastHeight),
+                    *origin_offset,
+                )
+                .map_err(|error| error.to_string())?;
+                info!("Projected {} conversion finished successfully.", format.to_uppercase());
+                return Ok(());
             }
         }
     }
@@ -647,7 +676,7 @@ fn validate_model_input(format: &str, input: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod model_config_tests {
-    use super::{ModelConfig, ModelGeoreference};
+    use super::{ModelConfig, ModelGeoreference, ProjectedAxisMapping};
 
     #[test]
     fn accepts_processor_model_config_shape() {
@@ -675,6 +704,36 @@ mod model_config_tests {
         assert_eq!(config.version, 1);
         assert_eq!(config.model.texture_roots.len(), 1);
         assert!(matches!(config.georeference, ModelGeoreference::Anchor { .. }));
+    }
+
+    #[test]
+    fn accepts_projected_model_config_shape() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "model": {
+                "format": "obj",
+                "unit": "meters",
+                "axes": "zUpRightHanded"
+              },
+              "georeference": {
+                "mode": "projected",
+                "sourceCrs": "EPSG:4547",
+                "axisMapping": "northEastHeight",
+                "originOffset": [500000, 3500000, 12]
+              }
+            }"#,
+        )
+        .expect("processor projected config parses");
+
+        assert!(matches!(
+            config.georeference,
+            ModelGeoreference::Projected {
+                axis_mapping: ProjectedAxisMapping::NorthEastHeight,
+                origin_offset: [500000.0, 3500000.0, 12.0],
+                ..
+            }
+        ));
     }
 }
 

@@ -9,11 +9,14 @@
 #include <nlohmann/json.hpp>
 #include "mesh_processor.h"
 #include <unordered_map>
+#include <memory>
 
 // Forward declarations
 namespace tinygltf {
     class Model;
 }
+
+class ProjectedCoordinateContext;
 
 struct PipelineSettings {
     std::string inputPath;
@@ -34,6 +37,13 @@ struct PipelineSettings {
     double latitude = 0.0;
     double height = 0.0;
     bool hasGeoreference = false;
+
+    bool hasProjectedGeoreference = false;
+    std::string projectedSourceCrs;
+    bool projectedAxisNorthEastHeight = false;
+    double projectedOriginX = 0.0;
+    double projectedOriginY = 0.0;
+    double projectedOriginZ = 0.0;
 
     // Geometric error scale (multiplier applied to boundingVolume diagonal)
     double geScale = 0.5; // Adjusted for better LOD switching with SSE=16
@@ -57,6 +67,7 @@ public:
 private:
     PipelineSettings settings;
     FBXLoader* loader = nullptr;
+    std::unique_ptr<ProjectedCoordinateContext> projectedCoordinates;
     struct LevelAccum { size_t count = 0; double sumDiag = 0.0; double sumGe = 0.0; size_t tightCount = 0; size_t fallbackCount = 0; size_t refineAdd = 0; size_t refineReplace = 0; };
     std::unordered_map<int, LevelAccum> levelStats;
 

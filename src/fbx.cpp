@@ -524,10 +524,8 @@ std::string FBXLoader::calcMeshHash(const ufbx_mesh *mesh) {
   // Only hash vertices/indices/faces count
   std::ostringstream oss;
 
-  // Do not merge distinct source materials until every emitted property and
-  // texture semantic participates in a stable hash. A pointer-based identity
-  // keeps mesh grouping correct while still allowing exact source reuse.
-  oss << "material@" << static_cast<const void*>(mat);
+  // Material identity is part of MeshKey::matHash below. Geometry hashes stay
+  // material-independent so exact geometry can still be shared safely.
   oss.write((const char*)mesh->vertices.data, mesh->vertices.count * sizeof(ufbx_vec3));
   oss.write((const char*)mesh->vertex_indices.data, mesh->vertex_indices.count * sizeof(uint32_t));
   oss.write((const char*)mesh->faces.data, mesh->faces.count * sizeof(ufbx_face));
@@ -825,9 +823,6 @@ osg::ref_ptr<osg::Geode> FBXLoader::processMesh(ufbx_node *node, ufbx_mesh *mesh
     // 2. Not in cache, process mesh
     // Use ufbx_generate_indices to handle vertex deduplication
 
-    // Calculate Mesh Hash (Base geometry hash)
-    std::string meshHash = calcMeshHash(mesh);
-
     // We need to flatten the indexed ufbx data into "wedge" arrays first,
     // because ufbx_generate_indices expects flat arrays of size num_indices.
     // It will then reorder/compact these arrays in-place.
@@ -1040,7 +1035,13 @@ osg::ref_ptr<osg::Geode> FBXLoader::processMesh(ufbx_node *node, ufbx_mesh *mesh
              }
         }
 
+        const ufbx_material* sourceMaterial =
+            mesh->materials.count > matIndex ? mesh->materials.data[matIndex] : nullptr;
+        // Geometry carries its StateSet, so reusing it across different source
+        // materials would silently replace texture and factor semantics. Keep
+        // exact source-material identity in this cache key.
         std::string geomHash = calc_part_geom_hash(num_vertices, tempPos, tempNorm, tempUV, tempColor, partIndices);
+        geomHash += "@material:" + std::to_string(reinterpret_cast<uintptr_t>(sourceMaterial));
         osg::ref_ptr<osg::Geometry> geometry;
         auto ghit = geometryHashCache.find(geomHash);
         if (ghit != geometryHashCache.end()) {
@@ -1068,9 +1069,8 @@ osg::ref_ptr<osg::Geode> FBXLoader::processMesh(ufbx_node *node, ufbx_mesh *mesh
         }
 
         // Material
-        if (mesh->materials.count > matIndex) {
-             ufbx_material *mat = mesh->materials.data[matIndex];
-             geometry->setStateSet(getOrCreateStateSet(mat));
+        if (sourceMaterial) {
+             geometry->setStateSet(getOrCreateStateSet(sourceMaterial));
         }
 
         geode->addDrawable(geometry);
@@ -1079,7 +1079,7 @@ osg::ref_ptr<osg::Geode> FBXLoader::processMesh(ufbx_node *node, ufbx_mesh *mesh
         CachedPart cpart;
         cpart.geometry = geometry;
         cpart.geomHash = geomHash;
-        cpart.matHash = calcMaterialHash(mesh->materials.count > matIndex ? mesh->materials.data[matIndex] : nullptr);
+        cpart.matHash = calcMaterialHash(sourceMaterial);
         cachedParts.push_back(cpart);
 
         // MeshPool Update
