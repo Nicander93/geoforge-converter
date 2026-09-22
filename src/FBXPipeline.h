@@ -45,6 +45,11 @@ struct PipelineSettings {
     double projectedOriginY = 0.0;
     double projectedOriginZ = 0.0;
 
+    // Model-space normalization. FBX is normalized by ufbx during import;
+    // OBJ supplies these explicitly through the model config contract.
+    double modelUnitToMeters = 1.0;
+    bool modelAxesZUp = false;
+
     // Geometric error scale (multiplier applied to boundingVolume diagonal)
     double geScale = 0.5; // Adjusted for better LOD switching with SSE=16
 

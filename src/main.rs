@@ -93,7 +93,10 @@ fn read_model_config(path: &str, format: &str) -> Result<ModelConfig, String> {
     let config: ModelConfig = serde_json::from_str(&text)
         .map_err(|error| format!("invalid model config {path}: {error}"))?;
     if config.version != 1 {
-        return Err(format!("unsupported model config version {}", config.version));
+        return Err(format!(
+            "unsupported model config version {}",
+            config.version
+        ));
     }
     if !config.model.format.eq_ignore_ascii_case(format) {
         return Err(format!(
@@ -107,12 +110,52 @@ fn read_model_config(path: &str, format: &str) -> Result<ModelConfig, String> {
     if config.model.axes == "fromMetadata" && format.eq_ignore_ascii_case("obj") {
         return Err("OBJ model config requires explicit axes".into());
     }
+    if !matches!(
+        config.model.unit.as_str(),
+        "fromMetadata" | "meters" | "centimeters" | "millimeters" | "feet"
+    ) {
+        return Err(format!("unsupported model unit {}", config.model.unit));
+    }
+    if !matches!(
+        config.model.axes.as_str(),
+        "fromMetadata" | "yUpRightHanded" | "zUpRightHanded"
+    ) {
+        return Err(format!("unsupported model axes {}", config.model.axes));
+    }
     if let ModelGeoreference::Projected { source_crs, .. } = &config.georeference {
         if source_crs.trim().is_empty() {
             return Err("projected model config requires sourceCrs".into());
         }
     }
     Ok(config)
+}
+
+fn model_normalization(
+    format: &str,
+    model_config: Option<&ModelConfig>,
+) -> Result<(f64, bool), String> {
+    let Some(config) = model_config else {
+        return Ok((1.0, false));
+    };
+    if format.eq_ignore_ascii_case("fbx") {
+        if config.model.unit != "fromMetadata" || config.model.axes != "fromMetadata" {
+            return Err("FBX supports only fromMetadata unit and axes; ufbx normalizes FBX metadata to meters and Y-up".into());
+        }
+        return Ok((1.0, false));
+    }
+    let unit_to_meters = match config.model.unit.as_str() {
+        "meters" => 1.0,
+        "centimeters" => 0.01,
+        "millimeters" => 0.001,
+        "feet" => 0.3048,
+        _ => return Err("OBJ model config requires an explicit supported unit".into()),
+    };
+    let axes_z_up = match config.model.axes.as_str() {
+        "yUpRightHanded" => false,
+        "zUpRightHanded" => true,
+        _ => return Err("OBJ model config requires explicit supported axes".into()),
+    };
+    Ok((unit_to_meters, axes_z_up))
 }
 
 /// Setup OpenSceneGraph environment variables for plugin loading
@@ -422,12 +465,23 @@ fn main() {
 
     // Initialize geoid calculator if geoid model is specified
     if geoid_model != "none" {
-        info!("Initializing geoid model: {} with path: {}", geoid_model, if geoid_path.is_empty() { "default" } else { geoid_path });
+        info!(
+            "Initializing geoid model: {} with path: {}",
+            geoid_model,
+            if geoid_path.is_empty() {
+                "default"
+            } else {
+                geoid_path
+            }
+        );
         let geoid_path_c = std::ffi::CString::new(geoid_path).unwrap_or_default();
         let geoid_model_c = std::ffi::CString::new(geoid_model).unwrap_or_default();
         let success = unsafe { fun_c::init_geoid(geoid_model_c.as_ptr(), geoid_path_c.as_ptr()) };
         if !success {
-            error!("Failed to initialize geoid model: {}. Height conversion will be disabled.", geoid_model);
+            error!(
+                "Failed to initialize geoid model: {}. Height conversion will be disabled.",
+                geoid_model
+            );
         }
     }
 
@@ -555,6 +609,7 @@ fn convert_model_cmd(
     use serde_json::Value;
 
     validate_model_input(format, input)?;
+    let (model_unit_to_meters, model_axes_z_up) = model_normalization(format, model_config)?;
 
     let mut max_lvl: Option<i32> = None;
     // Default to CLI args, or 0.0
@@ -592,9 +647,14 @@ fn convert_model_cmd(
                     source_crs,
                     matches!(axis_mapping, ProjectedAxisMapping::NorthEastHeight),
                     *origin_offset,
+                    model_unit_to_meters,
+                    model_axes_z_up,
                 )
                 .map_err(|error| error.to_string())?;
-                info!("Projected {} conversion finished successfully.", format.to_uppercase());
+                info!(
+                    "Projected {} conversion finished successfully.",
+                    format.to_uppercase()
+                );
                 return Ok(());
             }
         }
@@ -632,8 +692,16 @@ fn convert_model_cmd(
         }
     }
 
-    info!("Starting {} conversion: {} -> {}", format.to_uppercase(), input, output);
-    info!("Origin: lon={}, lat={}, height={}", longitude, latitude, height_f);
+    info!(
+        "Starting {} conversion: {} -> {}",
+        format.to_uppercase(),
+        input,
+        output
+    );
+    info!(
+        "Origin: lon={}, lat={}, height={}",
+        longitude, latitude, height_f
+    );
     if enable_lod {
         warn!("LOD is not supported for {format}; flag will be ignored");
     }
@@ -650,6 +718,8 @@ fn convert_model_cmd(
         latitude,
         height_f,
         has_georeference,
+        model_unit_to_meters,
+        model_axes_z_up,
     )
     .map_err(|error| error.to_string())?;
     info!("FBX conversion finished successfully.");
@@ -676,7 +746,7 @@ fn validate_model_input(format: &str, input: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod model_config_tests {
-    use super::{ModelConfig, ModelGeoreference, ProjectedAxisMapping};
+    use super::{model_normalization, ModelConfig, ModelGeoreference, ProjectedAxisMapping};
 
     #[test]
     fn accepts_processor_model_config_shape() {
@@ -703,7 +773,10 @@ mod model_config_tests {
         .expect("processor config parses");
         assert_eq!(config.version, 1);
         assert_eq!(config.model.texture_roots.len(), 1);
-        assert!(matches!(config.georeference, ModelGeoreference::Anchor { .. }));
+        assert!(matches!(
+            config.georeference,
+            ModelGeoreference::Anchor { .. }
+        ));
     }
 
     #[test]
@@ -734,6 +807,45 @@ mod model_config_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn normalizes_explicit_obj_units_and_axes() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "model": {
+                "format": "obj",
+                "unit": "centimeters",
+                "axes": "zUpRightHanded"
+              },
+              "georeference": { "mode": "local" }
+            }"#,
+        )
+        .expect("OBJ config parses");
+
+        assert_eq!(
+            model_normalization("obj", Some(&config)).unwrap(),
+            (0.01, true)
+        );
+    }
+
+    #[test]
+    fn rejects_explicit_fbx_units_and_axes() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "model": {
+                "format": "fbx",
+                "unit": "meters",
+                "axes": "zUpRightHanded"
+              },
+              "georeference": { "mode": "local" }
+            }"#,
+        )
+        .expect("FBX config parses");
+
+        assert!(model_normalization("fbx", Some(&config)).is_err());
     }
 }
 
@@ -888,7 +1000,15 @@ fn parse_origin_values(value: &str) -> Option<Vec<f64>> {
     Some(values)
 }
 
-fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enable_texture_compress: bool, enable_draco: bool, enable_unlit: bool) -> bool {
+fn convert_osgb(
+    src: &str,
+    dest: &str,
+    config: &str,
+    enable_simplify: bool,
+    enable_texture_compress: bool,
+    enable_draco: bool,
+    enable_unlit: bool,
+) -> bool {
     use serde_json::Value;
     use std::fs::File;
     use std::io::prelude::*;
@@ -917,7 +1037,10 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                 //
                 match serde_xml_rs::from_str::<ModelMetadata>(buffer.as_str()) {
                     Ok(metadata) => {
-                    info!("Parsed metadata.xml: SRS={}, SRSOrigin={}", metadata.SRS, metadata.SRSOrigin);
+                        info!(
+                            "Parsed metadata.xml: SRS={}, SRSOrigin={}",
+                            metadata.SRS, metadata.SRSOrigin
+                        );
                         let v: Vec<&str> = metadata.SRS.split(":").collect();
                         info!("SRS split result: {:?}", v);
                         if v.len() > 1 {
@@ -968,10 +1091,17 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                                 };
 
                                                 unsafe {
-                                                    let mut origin_enu = vec![offset_x, offset_y, offset_z];
+                                                    let mut origin_enu =
+                                                        vec![offset_x, offset_y, offset_z];
                                                     let gdal_ptr = gdal_c_str.as_ptr();
                                                     let proj_ptr = proj_c_str.as_ptr();
-                                                    if !osgb::enu_init(center_x, center_y, origin_enu.as_mut_ptr(), gdal_ptr, proj_ptr) {
+                                                    if !osgb::enu_init(
+                                                        center_x,
+                                                        center_y,
+                                                        origin_enu.as_mut_ptr(),
+                                                        gdal_ptr,
+                                                        proj_ptr,
+                                                    ) {
                                                         error!("OSGB_ENU_INIT_FAILED: enu_init failed for SRSOrigin {offset_x},{offset_y},{offset_z}");
                                                         return false;
                                                     }
@@ -982,7 +1112,8 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                                 // (per-vertex Correction is skipped for ENU).
                                                 enu_offset = Some((offset_x, offset_y, offset_z));
                                                 // Use the geoid-corrected height from GeoTransform (if geoid is initialized)
-                                                let geo_origin_height = unsafe { osgb::get_geo_origin_height() };
+                                                let geo_origin_height =
+                                                    unsafe { osgb::get_geo_origin_height() };
                                                 origin_height = Some(geo_origin_height);
 
                                                 info!("ENU SRSOrigin offset detected: x={}, y={}, z={}", offset_x, offset_y, offset_z);
@@ -1006,7 +1137,8 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                             } else if v[0] == "EPSG" {
                                 // call gdal to convert
                                 if let Ok(srs) = v[1].parse::<i32>() {
-                                    let Some(mut pt) = parse_origin_values(&metadata.SRSOrigin) else {
+                                    let Some(mut pt) = parse_origin_values(&metadata.SRSOrigin)
+                                    else {
                                         error!("SRSOrigin contains a non-numeric value");
                                         return false;
                                     };
@@ -1028,12 +1160,18 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                                         unsafe {
                                             let gdal_ptr = gdal_c_str.as_ptr();
                                             let proj_ptr = proj_c_str.as_ptr();
-                                            if osgb::epsg_convert(srs, pt.as_mut_ptr(), gdal_ptr, proj_ptr) {
+                                            if osgb::epsg_convert(
+                                                srs,
+                                                pt.as_mut_ptr(),
+                                                gdal_ptr,
+                                                proj_ptr,
+                                            ) {
                                                 center_x = pt[0];
                                                 center_y = pt[1];
                                                 // Use the geoid-corrected height from GeoTransform (if geoid is initialized)
                                                 // This handles the conversion from orthometric height (China 1985) to ellipsoidal height (WGS84)
-                                                let geo_origin_height = osgb::get_geo_origin_height();
+                                                let geo_origin_height =
+                                                    osgb::get_geo_origin_height();
                                                 origin_height = Some(geo_origin_height);
                                                 info!("epsg: x->{}, y->{}, h={} (geoid-corrected from original h={})", pt[0], pt[1], geo_origin_height, pt[2]);
                                             } else {
@@ -1102,15 +1240,24 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
                     }
                 }
             } else {
-                error!("OSGB_METADATA_READ_FAILED: read {} failed", metadata_file.display());
+                error!(
+                    "OSGB_METADATA_READ_FAILED: read {} failed",
+                    metadata_file.display()
+                );
                 return false;
             }
         } else {
-            error!("OSGB_METADATA_READ_FAILED: open {} failed", metadata_file.display());
+            error!(
+                "OSGB_METADATA_READ_FAILED: open {} failed",
+                metadata_file.display()
+            );
             return false;
         }
     } else {
-        error!("OSGB_METADATA_MISSING: {} is missing", metadata_file.display());
+        error!(
+            "OSGB_METADATA_MISSING: {} is missing",
+            metadata_file.display()
+        );
         return false;
     }
     if let Ok(v) = serde_json::from_str::<Value>(config) {
@@ -1128,23 +1275,38 @@ fn convert_osgb(src: &str, dest: &str, config: &str, enable_simplify: bool, enab
         }
     } else if config.len() > 0 {
         error!("OSGB_CONFIG_INVALID: config is not valid JSON: {}", config);
-        unsafe { fun_c::cleanup_global_resources(); }
+        unsafe {
+            fun_c::cleanup_global_resources();
+        }
         return false;
     }
     let tick = time::SystemTime::now();
     if let Err(e) = osgb::osgb_batch_convert(
-        &dir, &dir_dest, max_lvl,
-        center_x, center_y, trans_region,
-        enu_offset, origin_height, enable_texture_compress, enable_simplify, enable_draco, enable_unlit)
-    {
+        &dir,
+        &dir_dest,
+        max_lvl,
+        center_x,
+        center_y,
+        trans_region,
+        enu_offset,
+        origin_height,
+        enable_texture_compress,
+        enable_simplify,
+        enable_draco,
+        enable_unlit,
+    ) {
         error!("{}", e);
-        unsafe { fun_c::cleanup_global_resources(); }
+        unsafe {
+            fun_c::cleanup_global_resources();
+        }
         return false;
     }
     let elap_sec = tick.elapsed().unwrap_or_default();
     let tick_num = elap_sec.as_secs() as f64 + elap_sec.subsec_nanos() as f64 * 1e-9;
     info!("task over, cost {:.2} s.", tick_num);
-    unsafe { fun_c::cleanup_global_resources(); }
+    unsafe {
+        fun_c::cleanup_global_resources();
+    }
     true
 }
 
@@ -1162,14 +1324,8 @@ fn convert_shapefile(
     }
     let tick = std::time::SystemTime::now();
 
-    let ret = shape::shape_batch_convert(
-        src,
-        dest,
-        height,
-        enable_lod,
-        enable_simplify,
-        enable_draco,
-    );
+    let ret =
+        shape::shape_batch_convert(src, dest, height, enable_lod, enable_simplify, enable_draco);
     if !ret {
         error!("convert shapefile failed");
     } else {

@@ -525,6 +525,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
 
             auto emitPosition = [&](osg::Vec3d point) {
                 point = point * inst.matrix;
+                point *= settings.modelUnitToMeters;
                 double gx;
                 double gy;
                 double gz;
@@ -535,8 +536,13 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                     gz = enu.z();
                 } else {
                     gx = point.x();
-                    gy = -point.z();
-                    gz = point.y();
+                    if (settings.modelAxesZUp) {
+                        gy = point.y();
+                        gz = point.z();
+                    } else {
+                        gy = -point.z();
+                        gz = point.y();
+                    }
                 }
                 positions.push_back(static_cast<float>(gx));
                 positions.push_back(static_cast<float>(gy));
@@ -976,6 +982,16 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                 normals[index] = normal.x();
                 normals[index + 1] = normal.y();
                 normals[index + 2] = normal.z();
+            }
+        } else if (settings.modelAxesZUp) {
+            // Source normals were written through the legacy Y-up mapping
+            // (x, -z, y). Restore their direct Z-up form for explicit OBJ
+            // Z-up input without duplicating each vertex-array branch above.
+            for (size_t index = 0; index + 2 < normals.size(); index += 3) {
+                const float legacyY = normals[index + 1];
+                const float legacyZ = normals[index + 2];
+                normals[index + 1] = legacyZ;
+                normals[index + 2] = -legacyY;
             }
         }
         if (stats) {
@@ -2299,37 +2315,24 @@ void FBXPipeline::writeTilesetJson(const std::string& basePath, const osg::Bound
             return;
         }
 
-        // Calculate center of the model (in original local coordinates - Y-up from FBX)
-        double cx = (globalBounds.xMin() + globalBounds.xMax()) * 0.5;
-        double cy = (globalBounds.yMin() + globalBounds.yMax()) * 0.5;
-        double cz = (globalBounds.zMin() + globalBounds.zMax()) * 0.5;
-
-        // The geometry is in Z-up coordinates (x, -z, y) in B3DM.
-        // Model center in Z-up: (cx, -cz, cy)
-        //
-        // ENU_to_ECEF maps ENU origin (0,0,0) to target lon/lat/height.
-        // To place model center at target position, we need ENU origin to be at model center.
-        //
-        // In ENU coordinates (Z-up), model center is at (cx, -cz, cy).
-        // So we need to shift ENU origin by (cx, -cz, cy) in the ENU frame.
-        //
-        // This is equivalent to: transform = ENU_to_ECEF * translate(cx, -cz, cy)
-        // Which shifts the ENU origin so that model center maps to target position.
-
-        // Apply translation to ENU origin (in ENU frame, then rotated to ECEF)
-        // glm is column-major
-        // Translation in ENU frame: (cx, -cz, cy)
-        // After ENU_to_ECEF rotation, this becomes a translation in ECEF
-        double tx = cx;
-        double ty = -cz;  // Z-up: y is north, FBX z becomes -y in Z-up
-        double tz = cy;   // FBX y becomes z in Z-up
+        // rootContent uses the same normalized coordinate space as B3DM
+        // positions, including explicit OBJ units and axes. Deriving the
+        // anchor translation here prevents a source-space/output-space split.
+        const auto& box = rootContent["boundingVolume"]["box"];
+        if (!box.is_array() || box.size() != 12) {
+            LOG_E("Cannot anchor model: root boundingVolume.box is invalid");
+            return;
+        }
+        const double tx = box[0];
+        const double ty = box[1];
+        const double tz = box[2];
 
         // Add translation to the transform (ENU_to_ECEF * translation)
         enuToEcef[3][0] += tx * enuToEcef[0][0] + ty * enuToEcef[1][0] + tz * enuToEcef[2][0];
         enuToEcef[3][1] += tx * enuToEcef[0][1] + ty * enuToEcef[1][1] + tz * enuToEcef[2][1];
         enuToEcef[3][2] += tx * enuToEcef[0][2] + ty * enuToEcef[1][2] + tz * enuToEcef[2][2];
 
-        LOG_I("Model center Y-up: (%.2f, %.2f, %.2f), Z-up: (%.2f, %.2f, %.2f)", cx, cy, cz, tx, ty, tz);
+        LOG_I("Model center in normalized local coordinates: (%.2f, %.2f, %.2f)", tx, ty, tz);
 
         const double* m = (const double*)&enuToEcef;
         tileset["root"]["transform"] = {
@@ -2513,7 +2516,9 @@ extern "C" void* fbx23dtile(
     bool projected_axis_north_east_height,
     double projected_origin_x,
     double projected_origin_y,
-    double projected_origin_z
+    double projected_origin_z,
+    double model_unit_to_meters,
+    bool model_axes_z_up
 ) {
     std::string input(in_path);
     std::string output(out_path);
@@ -2532,6 +2537,8 @@ extern "C" void* fbx23dtile(
     settings.height = height;
     settings.hasGeoreference = has_georeference;
     settings.hasProjectedGeoreference = projected_source_crs != nullptr && projected_source_crs[0] != '\0';
+    settings.modelUnitToMeters = model_unit_to_meters;
+    settings.modelAxesZUp = model_axes_z_up;
     if (settings.hasProjectedGeoreference) {
         settings.projectedSourceCrs = projected_source_crs;
         settings.projectedAxisNorthEastHeight = projected_axis_north_east_height;

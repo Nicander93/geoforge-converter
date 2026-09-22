@@ -23,6 +23,8 @@ extern "C" {
         projected_origin_x: f64,
         projected_origin_y: f64,
         projected_origin_z: f64,
+        model_unit_to_meters: f64,
+        model_axes_z_up: bool,
     ) -> *mut libc::c_void;
 }
 
@@ -37,6 +39,8 @@ pub fn convert_fbx_projected(
     source_crs: &str,
     north_east_height: bool,
     origin_offset: [f64; 3],
+    model_unit_to_meters: f64,
+    model_axes_z_up: bool,
 ) -> Result<(), Box<dyn Error>> {
     let in_path = str_to_vec_c(in_file);
     let out_path = str_to_vec_c(out_dir);
@@ -65,6 +69,8 @@ pub fn convert_fbx_projected(
             origin_offset[0],
             origin_offset[1],
             origin_offset[2],
+            model_unit_to_meters,
+            model_axes_z_up,
         );
         if out_ptr.is_null() {
             return Err(From::from(format!(
@@ -89,6 +95,8 @@ pub fn convert_fbx(
     latitude: f64,
     height: f64,
     has_georeference: bool,
+    model_unit_to_meters: f64,
+    model_axes_z_up: bool,
 ) -> Result<(), Box<dyn Error>> {
     let in_path = str_to_vec_c(in_file);
     let out_path = str_to_vec_c(out_dir);
@@ -120,6 +128,8 @@ pub fn convert_fbx(
             0.0,
             0.0,
             0.0,
+            model_unit_to_meters,
+            model_axes_z_up,
         );
 
         if out_ptr.is_null() {

@@ -730,6 +730,10 @@ fn print_vcpkg_tree(root: &Path) -> io::Result<()> {
 }
 
 fn main() {
+    // CMake owns the native converter sources, so Cargo must rerun this build
+    // script whenever that tree changes instead of reusing a stale static lib.
+    println!("cargo:rerun-if-changed=CMakeLists.txt");
+    println!("cargo:rerun-if-changed=src");
     std::env::set_var("RUST_BACKTRACE", "full");
     match env::var("TARGET") {
         Ok(val) => match val.as_str() {
