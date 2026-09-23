@@ -1,6 +1,6 @@
 [package]
 name = "_3dtile"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["fanzhenhua <fanzhenhua@superengine.com.cn>"]
 edition = "2021"
 description = "GeoForge OSGB → 3D Tiles converter runtime (upstream: fanvanzh/3dtiles)"

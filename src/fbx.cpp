@@ -139,7 +139,8 @@ static std::string ufbx_string_to_std(const ufbx_string &s) {
 }
 
 static std::filesystem::path resolve_texture_path(const std::string &fbxPath,
-                                                  const ufbx_texture *tex) {
+                                                  const ufbx_texture *tex,
+                                                  const std::vector<std::string>& textureRoots) {
   if (!tex) {
     return {};
   }
@@ -173,6 +174,21 @@ static std::filesystem::path resolve_texture_path(const std::string &fbxPath,
       if (std::filesystem::exists(flatPath)) {
           return flatPath;
       }
+  }
+  std::filesystem::path rootRelative = ufbx_string_to_std(tex->relative_filename);
+  if (rootRelative.is_absolute() && !fbxPath.empty()) {
+      rootRelative = rootRelative.lexically_relative(std::filesystem::path(fbxPath).parent_path());
+  }
+  for (const auto& root : textureRoots) {
+      const std::filesystem::path rootPath(root);
+      if (!rootRelative.empty() && !rootRelative.is_absolute()) {
+          std::filesystem::path candidate = rootPath / rootRelative;
+          if (std::filesystem::exists(candidate)) return candidate;
+      }
+      std::filesystem::path candidate = rootPath / p;
+      if (!p.is_absolute() && std::filesystem::exists(candidate)) return candidate;
+      candidate = rootPath / p.filename();
+      if (std::filesystem::exists(candidate)) return candidate;
   }
 
   return {};
@@ -271,7 +287,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
 
         // 2. Try file path if not embedded or failed
         if (!image) {
-            std::filesystem::path filename = resolve_texture_path(source_filename, tex);
+            std::filesystem::path filename = resolve_texture_path(source_filename, tex, texture_roots);
             if (!filename.empty()) {
                 // Try STB first
                 int width, height, channels;
@@ -287,6 +303,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
             }
         }
 
+        if (!image) recordMissingTexture(tex, "baseColor");
         if (image) {
             osg::Texture2D* texture = new osg::Texture2D(image);
             texture->setWrap(osg::Texture::WRAP_S, osg::Texture::REPEAT);
@@ -314,7 +331,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
             }
         }
         if (!image) {
-            std::filesystem::path filename = resolve_texture_path(source_filename, ntex);
+            std::filesystem::path filename = resolve_texture_path(source_filename, ntex, texture_roots);
             if (!filename.empty()) {
                 int width, height, channels;
                 std::string pathStr = filename.string();
@@ -326,6 +343,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
                 }
             }
         }
+        if (!image) recordMissingTexture(ntex, "normal");
         if (image) {
             osg::Texture2D* texture = new osg::Texture2D(image);
             texture->setWrap(osg::Texture::WRAP_S, osg::Texture::REPEAT);
@@ -350,7 +368,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
             }
         }
         if (!image) {
-            std::filesystem::path filename = resolve_texture_path(source_filename, etex);
+            std::filesystem::path filename = resolve_texture_path(source_filename, etex, texture_roots);
             if (!filename.empty()) {
                 int width, height, channels;
                 std::string pathStr = filename.string();
@@ -362,6 +380,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
                 }
             }
         }
+        if (!image) recordMissingTexture(etex, "emission");
         if (image) {
             osg::Texture2D* texture = new osg::Texture2D(image);
             texture->setWrap(osg::Texture::WRAP_S, osg::Texture::REPEAT);
@@ -385,7 +404,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
             }
         }
         if (!image) {
-            std::filesystem::path filename = resolve_texture_path(source_filename, rtex);
+            std::filesystem::path filename = resolve_texture_path(source_filename, rtex, texture_roots);
             if (!filename.empty()) {
                 int width, height, channels;
                 std::string pathStr = filename.string();
@@ -397,6 +416,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
                 }
             }
         }
+        if (!image) recordMissingTexture(rtex, "roughness");
         if (image) {
             osg::Texture2D* texture = new osg::Texture2D(image);
             texture->setWrap(osg::Texture::WRAP_S, osg::Texture::REPEAT);
@@ -420,7 +440,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
             }
         }
         if (!image) {
-            std::filesystem::path filename = resolve_texture_path(source_filename, mtex);
+            std::filesystem::path filename = resolve_texture_path(source_filename, mtex, texture_roots);
             if (!filename.empty()) {
                 int width, height, channels;
                 std::string pathStr = filename.string();
@@ -432,6 +452,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
                 }
             }
         }
+        if (!image) recordMissingTexture(mtex, "metalness");
         if (image) {
             osg::Texture2D* texture = new osg::Texture2D(image);
             texture->setWrap(osg::Texture::WRAP_S, osg::Texture::REPEAT);
@@ -455,7 +476,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
             }
         }
         if (!image) {
-            std::filesystem::path filename = resolve_texture_path(source_filename, aotex);
+            std::filesystem::path filename = resolve_texture_path(source_filename, aotex, texture_roots);
             if (!filename.empty()) {
                 int width, height, channels;
                 std::string pathStr = filename.string();
@@ -467,6 +488,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
                 }
             }
         }
+        if (!image) recordMissingTexture(aotex, "ambientOcclusion");
         if (image) {
             osg::Texture2D* texture = new osg::Texture2D(image);
             texture->setWrap(osg::Texture::WRAP_S, osg::Texture::REPEAT);
@@ -497,7 +519,42 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
     return stateSet;
 }
 
-FBXLoader::FBXLoader(const std::string &filename) : source_filename(filename), scene(nullptr) {}
+FBXLoader::FBXLoader(const std::string &filename, std::vector<std::string> textureRoots, bool missingTextureIsError)
+    : source_filename(filename), texture_roots(std::move(textureRoots)), missing_texture_is_error(missingTextureIsError), scene(nullptr) {}
+
+bool FBXLoader::openExternalFile(void* user, ufbx_stream* stream, const char* path,
+                                 size_t path_length, const ufbx_open_file_info* info) {
+    if (ufbx_default_open_file(user, stream, path, path_length, info)) return true;
+    if (!user || !path) return false;
+
+    auto* loader = static_cast<FBXLoader*>(user);
+    std::string original_path;
+    if (info && info->original_filename.data && info->original_filename.size) {
+        original_path.assign(static_cast<const char*>(info->original_filename.data),
+                             info->original_filename.size);
+    }
+    const std::filesystem::path requested(original_path.empty()
+        ? std::string(path, path_length)
+        : original_path);
+    for (const auto& root : loader->texture_roots) {
+        const std::filesystem::path root_path(root);
+        const std::filesystem::path candidates[] = {
+            root_path / requested,
+            root_path / requested.filename(),
+        };
+        for (const auto& candidate : candidates) {
+            const std::string candidate_path = candidate.string();
+            ufbx_open_file_opts open_opts = {};
+            open_opts.filename_null_terminated = true;
+            ufbx_error error = {};
+            if (ufbx_open_file(stream, candidate_path.c_str(), candidate_path.size(),
+                               &open_opts, &error)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 FBXLoader::~FBXLoader() {
   if (scene != nullptr) {
@@ -636,11 +693,14 @@ std::unordered_map<std::string, std::string> FBXLoader::collectNodeAttrs(const u
 
 bool FBXLoader::load() {
     ufbx_load_opts opts = {};
+    opts.open_file_cb.fn = &FBXLoader::openExternalFile;
+    opts.open_file_cb.user = this;
     opts.target_axes = ufbx_axes_right_handed_y_up; // Convert to glTF/OpenGL standard (Y-up)
     opts.target_unit_meters = 1.0f; // Force output unit to be Meters (Cesium standard)
     opts.clean_skin_weights = true;
     opts.allow_missing_vertex_position = false; // Handle models with missing positions
     opts.generate_missing_normals = true; // Automatically generate normals if missing
+    opts.load_external_files = true; // Load OBJ MTL files and their texture references.
 
     // Ensure we handle triangulation if needed (though ufbx does this well by default)
     // opts.generate_indices is NOT a field in ufbx_load_opts. We must call ufbx_generate_indices manually per mesh.
@@ -693,7 +753,30 @@ bool FBXLoader::load() {
         LOG_E("FBX contains no visible triangle meshes: %s", source_filename.c_str());
         return false;
     }
+    if (missing_texture_is_error && !missing_texture_references.empty()) {
+        LOG_E("FBX import rejected: %zu texture reference(s) are missing or unreadable",
+              missing_texture_references.size());
+        return false;
+    }
     return true;
+}
+
+void FBXLoader::recordMissingTexture(const ufbx_texture* texture, const char* slot) {
+    if (!texture) return;
+
+    std::string reference = ufbx_string_to_std(texture->filename);
+    if (reference.empty()) reference = ufbx_string_to_std(texture->relative_filename);
+    if (reference.empty()) reference = ufbx_string_to_std(texture->absolute_filename);
+    if (reference.empty()) reference = ufbx_string_to_std(texture->name);
+    if (reference.empty()) reference = "<unnamed texture>";
+
+    const std::string key = std::string(slot) + ":" + reference;
+    if (!missing_texture_references.insert(key).second) return;
+    if (missing_texture_is_error) {
+        LOG_E("Missing or unreadable %s texture '%s'", slot, reference.c_str());
+    } else {
+        LOG_W("Missing or unreadable %s texture '%s'", slot, reference.c_str());
+    }
 }
 
 osg::ref_ptr<osg::Node> FBXLoader::loadNode(ufbx_node *node, const osg::Matrixd &parentXform) {

@@ -116,7 +116,7 @@ FBXPipeline::~FBXPipeline() {
 bool FBXPipeline::run() {
     LOG_I("Starting FBXPipeline...");
 
-    loader = new FBXLoader(settings.inputPath);
+    loader = new FBXLoader(settings.inputPath, settings.textureRoots, settings.missingTextureIsError);
     if (!loader->load()) {
         LOG_E("FBX import failed; pipeline will not write a tileset");
         return false;
@@ -2518,7 +2518,9 @@ extern "C" void* fbx23dtile(
     double projected_origin_y,
     double projected_origin_z,
     double model_unit_to_meters,
-    bool model_axes_z_up
+    bool model_axes_z_up,
+    const char* texture_roots_json,
+    bool missing_texture_is_error
 ) {
     std::string input(in_path);
     std::string output(out_path);
@@ -2539,6 +2541,21 @@ extern "C" void* fbx23dtile(
     settings.hasProjectedGeoreference = projected_source_crs != nullptr && projected_source_crs[0] != '\0';
     settings.modelUnitToMeters = model_unit_to_meters;
     settings.modelAxesZUp = model_axes_z_up;
+    if (texture_roots_json != nullptr && texture_roots_json[0] != '\0') {
+        const auto roots = nlohmann::json::parse(texture_roots_json, nullptr, false);
+        if (roots.is_discarded() || !roots.is_array()) {
+            LOG_E("Texture roots configuration must be a JSON array");
+            return nullptr;
+        }
+        for (const auto& root : roots) {
+            if (!root.is_string()) {
+                LOG_E("Texture roots configuration entries must be strings");
+                return nullptr;
+            }
+            settings.textureRoots.push_back(root.get<std::string>());
+        }
+    }
+    settings.missingTextureIsError = missing_texture_is_error;
     if (settings.hasProjectedGeoreference) {
         settings.projectedSourceCrs = projected_source_crs;
         settings.projectedAxisNorthEastHeight = projected_axis_north_east_height;

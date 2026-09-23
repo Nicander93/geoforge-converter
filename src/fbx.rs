@@ -25,6 +25,8 @@ extern "C" {
         projected_origin_z: f64,
         model_unit_to_meters: f64,
         model_axes_z_up: bool,
+        texture_roots_json: *const u8,
+        missing_texture_is_error: bool,
     ) -> *mut libc::c_void;
 }
 
@@ -41,10 +43,13 @@ pub fn convert_fbx_projected(
     origin_offset: [f64; 3],
     model_unit_to_meters: f64,
     model_axes_z_up: bool,
+    texture_roots: &[String],
+    missing_texture_is_error: bool,
 ) -> Result<(), Box<dyn Error>> {
     let in_path = str_to_vec_c(in_file);
     let out_path = str_to_vec_c(out_dir);
     let source_crs = str_to_vec_c(source_crs);
+    let texture_roots_json = str_to_vec_c(&serde_json::to_string(texture_roots)?);
     fs::create_dir_all(out_dir)?;
 
     let mut root_box = vec![0f64; 6];
@@ -71,6 +76,8 @@ pub fn convert_fbx_projected(
             origin_offset[2],
             model_unit_to_meters,
             model_axes_z_up,
+            texture_roots_json.as_ptr(),
+            missing_texture_is_error,
         );
         if out_ptr.is_null() {
             return Err(From::from(format!(
@@ -97,9 +104,12 @@ pub fn convert_fbx(
     has_georeference: bool,
     model_unit_to_meters: f64,
     model_axes_z_up: bool,
+    texture_roots: &[String],
+    missing_texture_is_error: bool,
 ) -> Result<(), Box<dyn Error>> {
     let in_path = str_to_vec_c(in_file);
     let out_path = str_to_vec_c(out_dir);
+    let texture_roots_json = str_to_vec_c(&serde_json::to_string(texture_roots)?);
 
     // Create output directory
     fs::create_dir_all(out_dir)?;
@@ -130,6 +140,8 @@ pub fn convert_fbx(
             0.0,
             model_unit_to_meters,
             model_axes_z_up,
+            texture_roots_json.as_ptr(),
+            missing_texture_is_error,
         );
 
         if out_ptr.is_null() {

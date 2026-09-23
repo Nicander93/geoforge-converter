@@ -122,12 +122,22 @@ fn read_model_config(path: &str, format: &str) -> Result<ModelConfig, String> {
     ) {
         return Err(format!("unsupported model axes {}", config.model.axes));
     }
+    validate_missing_texture_policy(config.model.missing_texture_policy.as_deref())?;
     if let ModelGeoreference::Projected { source_crs, .. } = &config.georeference {
         if source_crs.trim().is_empty() {
             return Err("projected model config requires sourceCrs".into());
         }
     }
     Ok(config)
+}
+
+fn validate_missing_texture_policy(policy: Option<&str>) -> Result<(), String> {
+    match policy {
+        None | Some("warn" | "error") => Ok(()),
+        Some(policy) => Err(format!(
+            "unsupported missingTexturePolicy {policy}; expected warn or error"
+        )),
+    }
 }
 
 fn model_normalization(
@@ -610,6 +620,12 @@ fn convert_model_cmd(
 
     validate_model_input(format, input)?;
     let (model_unit_to_meters, model_axes_z_up) = model_normalization(format, model_config)?;
+    let texture_roots = model_config
+        .map(|config| config.model.texture_roots.as_slice())
+        .unwrap_or(&[]);
+    let missing_texture_is_error = model_config
+        .and_then(|config| config.model.missing_texture_policy.as_deref())
+        == Some("error");
 
     let mut max_lvl: Option<i32> = None;
     // Default to CLI args, or 0.0
@@ -649,6 +665,8 @@ fn convert_model_cmd(
                     *origin_offset,
                     model_unit_to_meters,
                     model_axes_z_up,
+                    texture_roots,
+                    missing_texture_is_error,
                 )
                 .map_err(|error| error.to_string())?;
                 info!(
@@ -720,6 +738,8 @@ fn convert_model_cmd(
         has_georeference,
         model_unit_to_meters,
         model_axes_z_up,
+        texture_roots,
+        missing_texture_is_error,
     )
     .map_err(|error| error.to_string())?;
     info!("FBX conversion finished successfully.");
@@ -746,7 +766,18 @@ fn validate_model_input(format: &str, input: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod model_config_tests {
-    use super::{model_normalization, ModelConfig, ModelGeoreference, ProjectedAxisMapping};
+    use super::{
+        model_normalization, validate_missing_texture_policy, ModelConfig, ModelGeoreference,
+        ProjectedAxisMapping,
+    };
+
+    #[test]
+    fn accepts_supported_missing_texture_policies() {
+        assert!(validate_missing_texture_policy(None).is_ok());
+        assert!(validate_missing_texture_policy(Some("warn")).is_ok());
+        assert!(validate_missing_texture_policy(Some("error")).is_ok());
+        assert!(validate_missing_texture_policy(Some("ignore")).is_err());
+    }
 
     #[test]
     fn accepts_processor_model_config_shape() {

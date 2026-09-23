@@ -49,6 +49,8 @@ struct PipelineSettings {
     // OBJ supplies these explicitly through the model config contract.
     double modelUnitToMeters = 1.0;
     bool modelAxesZUp = false;
+    std::vector<std::string> textureRoots;
+    bool missingTextureIsError = false;
 
     // Geometric error scale (multiplier applied to boundingVolume diagonal)
     double geScale = 0.5; // Adjusted for better LOD switching with SSE=16

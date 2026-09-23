@@ -1,0 +1,4 @@
+newmtl ExternalTexture
+Ka 1.0 1.0 1.0
+Kd 1.0 1.0 1.0
+map_Kd space dir/space tex.png

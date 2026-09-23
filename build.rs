@@ -93,6 +93,9 @@ fn build_win_msvc() {
         .define("CMAKE_TOOLCHAIN_FILE", format!("{}/scripts/buildsystems/vcpkg.cmake", vcpkg_root))
         .define("VCPKG_INSTALLED_DIR", &vcpkg_installed_root)
         .define("CMAKE_EXPORT_COMPILE_COMMANDS", "ON")
+        // Rust's MSVC debug profile still links the release CRT. Building the
+        // native static library as Debug selects /MDd and causes CRT conflicts.
+        .profile("Release")
         .very_verbose(true);
 
     // When a prepared install tree is supplied explicitly, do not let CMake
@@ -126,19 +129,12 @@ fn build_win_msvc() {
     // vcpkg_installed path
     let vcpkg_installed_dir = vcpkg_installed_root.join("x64-windows");
 
-    // Link Search Path for third party library
+    // Rust binaries use the release MSVC CRT in both Cargo profiles; use the
+    // release vcpkg libraries to keep the CRT and iterator ABI consistent.
     let vcpkg_installed_lib_dir = vcpkg_installed_dir.join("lib");
     println!("cargo:rustc-link-search=native={}", vcpkg_installed_lib_dir.display());
-
-    // Determine if building in debug or release mode
-    let profile = env::var("PROFILE").unwrap_or("release".to_string());
-    let is_debug = profile == "debug";
-    let geolib_lib_name = if is_debug {
-        "GeographicLib_d-i"
-    } else {
-        "GeographicLib-i"
-    };
-    println!("cargo:warning=Building in {} mode, linking GeographicLib as: {}", profile, geolib_lib_name);
+    let geolib_lib_name = "GeographicLib-i";
+    println!("cargo:warning=Linking GeographicLib as: {}", geolib_lib_name);
 
     // 1. FFI static
     println!("cargo:rustc-link-lib=static=_3dtile");
