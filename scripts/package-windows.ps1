@@ -33,22 +33,29 @@ $redistRoots = @(
   (Join-Path $env:ProgramFiles "Microsoft Visual Studio")
 ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
 
-$crtDir = $null
-foreach ($rootPath in $redistRoots) {
-  $crtDir = Get-ChildItem -Path $rootPath -Directory -Filter "Microsoft.VC*.CRT" -Recurse -ErrorAction SilentlyContinue |
+$crtCandidates = foreach ($rootPath in $redistRoots) {
+  Get-ChildItem -Path $rootPath -Directory -Filter "Microsoft.VC*.CRT" -Recurse -ErrorAction SilentlyContinue |
     Where-Object {
       $_.FullName -match '\\x64\\Microsoft\.VC\d+\.CRT$' -and
       $_.FullName -notmatch '\\debug_nonredist\\' -and
       $_.FullName -notmatch '\\onecore\\'
     } |
-    Sort-Object FullName |
-    Select-Object -First 1
-  if ($crtDir) { break }
+    ForEach-Object {
+      $runtimeDll = Join-Path $_.FullName "vcruntime140.dll"
+      if (Test-Path -LiteralPath $runtimeDll -PathType Leaf) {
+        $info = (Get-Item -LiteralPath $runtimeDll).VersionInfo
+        [pscustomobject]@{
+          Directory = $_.FullName
+          Version = [version]::new($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart)
+        }
+      }
+    }
 }
-if (-not $crtDir) {
+$crt = $crtCandidates | Sort-Object Version -Descending | Select-Object -First 1
+if (-not $crt) {
   Write-Error "Unable to locate the x64 MSVC release CRT (Microsoft.VC*.CRT)."
 }
-Get-ChildItem $crtDir.FullName -Filter *.dll | ForEach-Object {
+Get-ChildItem $crt.Directory -Filter *.dll | ForEach-Object {
   Copy-Item -Force $_.FullName $OutDir
 }
 $requiredCrt = @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
@@ -56,7 +63,7 @@ $missingCrt = $requiredCrt | Where-Object { -not (Test-Path (Join-Path $OutDir $
 if ($missingCrt) {
   Write-Error "MSVC runtime staging incomplete: missing $($missingCrt -join ', ')"
 }
-Write-Host "Copied MSVC CRT from $($crtDir.FullName)"
+Write-Host "Copied MSVC CRT $($crt.Version) from $($crt.Directory)"
 
 function Copy-RuntimeDir($Src, $Dst) {
   if (-not (Test-Path $Src)) { return $false }
