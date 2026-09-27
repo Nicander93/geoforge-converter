@@ -10,6 +10,8 @@ extern crate chrono;
 extern crate env_logger;
 extern crate libc;
 
+mod block_job;
+mod block_manifest;
 mod common;
 mod fbx;
 pub mod fun_c;
