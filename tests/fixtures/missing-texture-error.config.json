@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "model": {
+    "format": "obj",
+    "unit": "meters",
+    "axes": "yUpRightHanded",
+    "missingTexturePolicy": "error",
+    "textureRoots": []
+  },
+  "georeference": { "mode": "local" },
+  "texture": { "mode": "keep" },
+  "modelOutput": { "format": "3dtiles-1.0", "tiling": "single", "lod": false }
+}

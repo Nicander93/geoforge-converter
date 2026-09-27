@@ -1,5 +1,5 @@
 extern crate cmake;
-use std::{env, fs, io, path::Path};
+use std::{env, fs, io, path::{Path, PathBuf}};
 
 use cmake::Config;
 
@@ -79,11 +79,31 @@ fn build_win_msvc() {
     // Check if strict mode is enabled via environment variable
     let enable_strict = env::var("ENABLE_STRICT_CHECKS").unwrap_or_default() == "1";
 
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let default_vcpkg_installed_dir = Path::new(&out_dir).join("build").join("vcpkg_installed");
+    // CI can provide a prepared manifest install tree directly. This avoids
+    // requiring SeCreateSymbolicLinkPrivilege on developer machines while
+    // preserving the historical OUT_DIR layout as the default.
+    let vcpkg_installed_root = env::var_os("GEOFORGE_VCPKG_INSTALLED_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or(default_vcpkg_installed_dir);
+
     let mut config = Config::new(".");
     config
         .define("CMAKE_TOOLCHAIN_FILE", format!("{}/scripts/buildsystems/vcpkg.cmake", vcpkg_root))
+        .define("VCPKG_INSTALLED_DIR", &vcpkg_installed_root)
         .define("CMAKE_EXPORT_COMPILE_COMMANDS", "ON")
+        // Rust's MSVC debug profile still links the release CRT. Building the
+        // native static library as Debug selects /MDd and causes CRT conflicts.
+        .profile("Release")
         .very_verbose(true);
+
+    // When a prepared install tree is supplied explicitly, do not let CMake
+    // re-enter vcpkg manifest mode and rebuild the dependency graph. This is
+    // useful for offline/CI builds where the tree has already been installed.
+    if env::var_os("GEOFORGE_VCPKG_INSTALLED_ROOT").is_some() {
+        config.define("VCPKG_MANIFEST_MODE", "OFF");
+    }
 
     if enable_strict {
         println!("cargo:warning=Building with STRICT CHECKS enabled (CI mode)");
@@ -103,29 +123,18 @@ fn build_win_msvc() {
     println!("cargo:rustc-link-search=native={}/thirdparty/draco", Path::new(&source_dir).display());
     println!("cargo:rustc-link-lib=static=draco");
 
-    let out_dir = env::var("OUT_DIR").unwrap();
     println!("cargo:warning=out_dir = {}", &out_dir);
     export_compile_commands(Path::new(&out_dir));
     print_vcpkg_tree(Path::new(&out_dir)).unwrap();
     // vcpkg_installed path
-    let vcpkg_installed_dir = Path::new(&out_dir)
-        .join("build")
-        .join("vcpkg_installed")
-        .join("x64-windows");
+    let vcpkg_installed_dir = vcpkg_installed_root.join("x64-windows");
 
-    // Link Search Path for third party library
+    // Rust binaries use the release MSVC CRT in both Cargo profiles; use the
+    // release vcpkg libraries to keep the CRT and iterator ABI consistent.
     let vcpkg_installed_lib_dir = vcpkg_installed_dir.join("lib");
     println!("cargo:rustc-link-search=native={}", vcpkg_installed_lib_dir.display());
-
-    // Determine if building in debug or release mode
-    let profile = env::var("PROFILE").unwrap_or("release".to_string());
-    let is_debug = profile == "debug";
-    let geolib_lib_name = if is_debug {
-        "GeographicLib_d-i"
-    } else {
-        "GeographicLib-i"
-    };
-    println!("cargo:warning=Building in {} mode, linking GeographicLib as: {}", profile, geolib_lib_name);
+    let geolib_lib_name = "GeographicLib-i";
+    println!("cargo:warning=Linking GeographicLib as: {}", geolib_lib_name);
 
     // 1. FFI static
     println!("cargo:rustc-link-lib=static=_3dtile");
@@ -717,6 +726,10 @@ fn print_vcpkg_tree(root: &Path) -> io::Result<()> {
 }
 
 fn main() {
+    // CMake owns the native converter sources, so Cargo must rerun this build
+    // script whenever that tree changes instead of reusing a stale static lib.
+    println!("cargo:rerun-if-changed=CMakeLists.txt");
+    println!("cargo:rerun-if-changed=src");
     std::env::set_var("RUST_BACKTRACE", "full");
     match env::var("TARGET") {
         Ok(val) => match val.as_str() {

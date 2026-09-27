@@ -30,17 +30,35 @@ extern "C" {
 
     pub fn osgb2glb(name_in: *const u8, name_out: *const u8) -> bool;
 
-	fn transform_c(radian_x: f64, radian_y: f64, height_min: f64, ptr: *mut f64);
+    fn transform_c(radian_x: f64, radian_y: f64, height_min: f64, ptr: *mut f64);
 
-	fn transform_c_with_enu_offset(center_x: f64, center_y: f64, height_min: f64,
-	                               enu_offset_x: f64, enu_offset_y: f64, enu_offset_z: f64,
-	                               ptr: *mut f64);
+    fn transform_c_with_enu_offset(
+        center_x: f64,
+        center_y: f64,
+        height_min: f64,
+        enu_offset_x: f64,
+        enu_offset_y: f64,
+        enu_offset_z: f64,
+        ptr: *mut f64,
+    );
 
-    pub fn epsg_convert(insrs: i32, val: *mut f64, gdal: *const libc::c_char, proj: *const libc::c_char) -> bool;
+    pub fn epsg_convert(
+        insrs: i32,
+        val: *mut f64,
+        gdal: *const libc::c_char,
+        proj: *const libc::c_char,
+    ) -> bool;
 
-    pub fn enu_init(lon: f64, lat: f64, origin_enu: *mut f64, gdal: *const libc::c_char, proj: *const libc::c_char) -> bool;
+    pub fn enu_init(
+        lon: f64,
+        lat: f64,
+        origin_enu: *mut f64,
+        gdal: *const libc::c_char,
+        proj: *const libc::c_char,
+    ) -> bool;
 
-    pub fn wkt_convert(gdal: *const libc::c_char, val: *mut f64, gdal: *const libc::c_char) -> bool;
+    pub fn wkt_convert(gdal: *const libc::c_char, val: *mut f64, gdal: *const libc::c_char)
+        -> bool;
 
     fn degree2rad(val: f64) -> f64;
 
@@ -64,7 +82,20 @@ struct TileResult {
 struct OsgbInfo {
     in_dir: String,
     out_dir: String,
-    sender: ::std::sync::mpsc::Sender<TileResult>,
+    sender: ::std::sync::mpsc::Sender<Result<TileResult, String>>,
+}
+
+fn convert_threads() -> usize {
+    if let Ok(value) = std::env::var("GEOFORGE_CONVERT_THREADS") {
+        if let Ok(parsed) = value.parse::<usize>() {
+            if parsed > 0 {
+                return parsed;
+            }
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|value| (value.get() / 2).clamp(1, 8))
+        .unwrap_or(1)
 }
 
 pub fn osgb_batch_convert(
@@ -99,13 +130,16 @@ pub fn osgb_batch_convert(
         let path_tile = entry.path();
         if path_tile.is_dir() {
             // if Tile_xx_xx.osgb
-            let stem = path_tile.file_stem().unwrap().to_str().unwrap();
-            let osgb = path_tile.join(stem).with_extension("osgb");
+            let stem = path_tile
+                .file_stem()
+                .map(|value| value.to_string_lossy().into_owned())
+                .ok_or_else(|| format!("tile directory has no name: {}", path_tile.display()))?;
+            let osgb = path_tile.join(&stem).with_extension("osgb");
             if osgb.exists() && !osgb.is_dir() {
                 // convert this path
                 task_count += 1;
                 //let in_buf = str_to_vec_c(osgb.to_str().unwrap());
-                let out_dir = dir_dest.join("Data").join(stem);
+                let out_dir = dir_dest.join("Data").join(&stem);
                 fs::create_dir_all(&out_dir)?;
                 osgb_dir_pair.push(OsgbInfo {
                     in_dir: osgb.to_string_lossy().into(),
@@ -122,55 +156,90 @@ pub fn osgb_batch_convert(
     let rad_y = unsafe { degree2rad(center_y) };
 
     let max_lvl: i32 = max_lvl.unwrap_or(100);
-    osgb_dir_pair
-        .into_par_iter()
-        .map(|info| unsafe {
-            let mut root_box = vec![0f64; 6];
-            let mut json_buf = vec![];
-            let mut json_len = 0i32;
-            let in_ptr = str_to_vec_c(&info.in_dir);
-            let out_ptr = str_to_vec_c(&info.out_dir);
-            let out_ptr = osgb23dtile_path(
-                in_ptr.as_ptr(),
-                out_ptr.as_ptr(),
-                root_box.as_mut_ptr(),
-                (&mut json_len) as *mut i32,
-                rad_x,
-                rad_y,
-                max_lvl,
-                enable_texture_compress,
-                enable_meshopt,
-                enable_draco_compress,
-                enable_unlit,
-            );
-            if out_ptr.is_null() {
-                error!("failed: {}", info.in_dir);
-            } else {
-                json_buf.resize(json_len as usize, 0);
-                libc::memcpy(
-                    json_buf.as_mut_ptr() as *mut libc::c_void,
-                    out_ptr,
-                    json_len as usize,
+    let thread_count = convert_threads();
+    log::info!("OSGB conversion using {} worker threads", thread_count);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(thread_count)
+        .build()?;
+    pool.install(|| {
+        osgb_dir_pair
+            .into_par_iter()
+            .map(|info| unsafe {
+                let mut root_box = vec![0f64; 6];
+                let mut json_buf = vec![];
+                let mut json_len = 0i32;
+                let in_ptr = str_to_vec_c(&info.in_dir);
+                let out_ptr = str_to_vec_c(&info.out_dir);
+                let out_ptr = osgb23dtile_path(
+                    in_ptr.as_ptr(),
+                    out_ptr.as_ptr(),
+                    root_box.as_mut_ptr(),
+                    (&mut json_len) as *mut i32,
+                    rad_x,
+                    rad_y,
+                    max_lvl,
+                    enable_texture_compress,
+                    enable_meshopt,
+                    enable_draco_compress,
+                    enable_unlit,
                 );
-                libc::free(out_ptr);
-            }
-            let t = TileResult {
-                path: info.out_dir.into(),
-                json: String::from_utf8(json_buf).unwrap(),
-                box_v: root_box,
-            };
-            info.sender.send(t).unwrap();
-        })
-        .count();
+                let result = if out_ptr.is_null() {
+                    Err(format!(
+                        "converter returned no JSON for tile: {}",
+                        info.in_dir
+                    ))
+                } else if json_len < 0 {
+                    libc::free(out_ptr);
+                    Err(format!(
+                        "converter returned a negative JSON length for tile: {}",
+                        info.in_dir
+                    ))
+                } else if json_len as usize > 64 * 1024 * 1024 {
+                    libc::free(out_ptr);
+                    Err(format!(
+                        "converter returned an unreasonable JSON length for tile {}: {} bytes",
+                        info.in_dir, json_len
+                    ))
+                } else {
+                    json_buf.resize(json_len as usize, 0);
+                    libc::memcpy(
+                        json_buf.as_mut_ptr() as *mut libc::c_void,
+                        out_ptr,
+                        json_len as usize,
+                    );
+                    libc::free(out_ptr);
+                    match String::from_utf8(json_buf) {
+                        Ok(json) => Ok(TileResult {
+                            path: info.out_dir.clone(),
+                            json,
+                            box_v: root_box,
+                        }),
+                        Err(error) => Err(format!(
+                            "generated tile JSON is not valid UTF-8 for {}: {error}",
+                            info.in_dir
+                        )),
+                    }
+                };
+                info.sender
+                    .send(result)
+                    .map_err(|error| format!("failed to report tile result: {error}"))?;
+                Ok::<(), String>(())
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })?;
 
     // merge and root
     let mut tile_array = vec![];
     for _ in 0..task_count {
-        if let Ok(t) = receiver.recv() {
-            if !t.json.is_empty() {
-                tile_array.push(t);
-            }
+        match receiver.recv() {
+            Ok(Ok(t)) if !t.json.is_empty() => tile_array.push(t),
+            Ok(Ok(_)) => return Err("converter returned an empty tile JSON".into()),
+            Ok(Err(error)) => return Err(error.into()),
+            Err(error) => return Err(format!("tile result channel closed: {error}").into()),
         }
+    }
+    if tile_array.is_empty() {
+        return Err("converter produced no valid tiles".into());
     }
     let mut root_box = vec![-1.0E+38f64, -1.0E+38, -1.0E+38, 1.0E+38, 1.0E+38, 1.0E+38];
     let mut root_geometric_error = 0.0;
@@ -185,7 +254,8 @@ pub fn osgb_batch_convert(
                 root_box[i] = x.box_v[i]
             }
         }
-        let json_val: serde_json::Value = serde_json::from_str(&x.json).unwrap();
+        let json_val: serde_json::Value = serde_json::from_str(&x.json)
+            .map_err(|error| format!("invalid tile JSON for {}: {error}", x.path))?;
         if let Some(ge) = json_val["geometricError"].as_f64() {
             if ge > root_geometric_error {
                 root_geometric_error = ge;
@@ -208,7 +278,15 @@ pub fn osgb_batch_convert(
     unsafe {
         if let Some((enu_x, enu_y, enu_z)) = enu_offset {
             // Use the ENU-aware transform function
-            transform_c_with_enu_offset(center_x, center_y, tras_height, enu_x, enu_y, enu_z, trans_vec.as_mut_ptr());
+            transform_c_with_enu_offset(
+                center_x,
+                center_y,
+                tras_height,
+                enu_x,
+                enu_y,
+                enu_z,
+                trans_vec.as_mut_ptr(),
+            );
         } else {
             // Use standard transform function
             transform_c(center_x, center_y, tras_height, trans_vec.as_mut_ptr());
@@ -233,11 +311,33 @@ pub fn osgb_batch_convert(
         }
     );
 
-    let out_dir: String = dir_dest.to_string_lossy().into();
     for x in tile_array {
-        let path = x.path;
-        let json_val: serde_json::Value = serde_json::from_str(&x.json).unwrap();
-        let tile_box = json_val["boundingVolume"]["box"].as_array().unwrap();
+        let path = x.path.clone();
+        let relative_path = Path::new(&path)
+            .strip_prefix(dir_dest)
+            .map_err(|error| {
+                format!(
+                    "tile output path is outside the converter output root: {} ({error})",
+                    x.path
+                )
+            })?;
+        let relative_uri = relative_path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .to_string();
+        if relative_uri.is_empty() {
+            return Err(format!("tile output path is empty: {}", x.path).into());
+        }
+        let tile_uri = format!("./{relative_uri}/tileset.json");
+        let json_val: serde_json::Value = serde_json::from_str(&x.json)
+            .map_err(|error| format!("invalid tile JSON for {}: {error}", x.path))?;
+        let tile_box = json_val
+            .get("boundingVolume")
+            .and_then(|value| value.get("box"))
+            .and_then(|value| value.as_array())
+            .filter(|value| value.len() == 12)
+            .ok_or_else(|| format!("tile JSON has no valid bounding box: {}", x.path))?;
         let tile_geometric_error = json_val["geometricError"].as_f64().unwrap_or(1000.0);
         let tile_object = json!(
             {
@@ -246,13 +346,13 @@ pub fn osgb_batch_convert(
                 },
                 "geometricError": tile_geometric_error,
                 "content": {
-                    "uri" : format!("{}/tileset.json", path.replace(&out_dir,"./").replace("\\","/"))
+                    "uri": tile_uri
                 }
             }
         );
         root_json["root"]["children"]
             .as_array_mut()
-            .unwrap()
+            .ok_or_else(|| "root tileset children is not an array".to_string())?
             .push(tile_object);
         let sub_tile = json!({
             "asset": {
@@ -265,11 +365,11 @@ pub fn osgb_batch_convert(
         );
         let out_file = path.clone() + "/tileset.json";
         let mut f = File::create(out_file)?;
-        f.write_all(serde_json::to_string_pretty(&sub_tile).unwrap().as_bytes())?;
+        f.write_all(serde_json::to_string_pretty(&sub_tile)?.as_bytes())?;
     }
     let path_json = dir_dest.join("tileset.json");
     let mut f = File::create(path_json)?;
-    f.write_all(serde_json::to_string_pretty(&root_json).unwrap().as_bytes())?;
+    f.write_all(serde_json::to_string_pretty(&root_json)?.as_bytes())?;
     Ok(())
 }
 
@@ -302,4 +402,3 @@ fn box_to_tileset_box(box_v: &Vec<f64>) -> Vec<f64> {
 
     box_new
 }
-

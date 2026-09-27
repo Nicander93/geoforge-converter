@@ -73,15 +73,33 @@ jobs:
         env:
           VCPKG_HAS_BEEN_INSTALLED: "1"
 
+      - name: Test FBX and OBJ texture coordinates
+        run: cargo test --release --test fbx_uv_orientation
+        env:
+          VCPKG_HAS_BEEN_INSTALLED: "1"
+
       - name: Package converter runtime
         shell: pwsh
         run: |
           $ver = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '0.0.0-ci' }
           powershell -File scripts/package-windows.ps1 -OutDir dist/converter -Version $ver
+          $required = @('_3dtile.exe', 'msvcp140.dll', 'msvcp140_2.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path 'dist/converter' $_)) }
+          if ($missing) { throw "Converter package is missing: $($missing -join ', ')" }
+          Push-Location dist/converter
+          & (Join-Path (Get-Location) '_3dtile.exe') --help | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "_3dtile.exe --help failed with exit=$LASTEXITCODE" }
+          Pop-Location
           $zip = "geoforge-converter-$ver-windows-x64.zip"
           Compress-Archive -Path dist/converter/* -DestinationPath $zip -Force
           Get-FileHash $zip -Algorithm SHA256 | Format-List
           (Get-FileHash $zip -Algorithm SHA256).Hash | Out-File -Encoding ascii "$zip.sha256"
+
+      - name: Smoke test packaged FBX and OBJ conversion
+        shell: pwsh
+        run: |
+          $ver = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '0.0.0-ci' }
+          ./scripts/smoke-release-windows.ps1 -ZipPath "geoforge-converter-$ver-windows-x64.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

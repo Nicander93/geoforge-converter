@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "model": {
+    "format": "obj",
+    "unit": "meters",
+    "axes": "zUpRightHanded"
+  },
+  "georeference": {
+    "mode": "projected",
+    "sourceCrs": "EPSG:3857",
+    "axisMapping": "eastNorthHeight",
+    "originOffset": [0, 0, 0]
+  },
+  "texture": { "mode": "keep" },
+  "modelOutput": { "format": "3dtiles-1.0", "tiling": "single", "lod": false }
+}

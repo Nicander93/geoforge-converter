@@ -24,6 +24,47 @@ foreach ($dllDir in @($ExeDir, (Join-Path $VcpkgRoot "bin"))) {
   }
 }
 
+# Rust and the native OSG/GDAL stack are built with the MSVC dynamic CRT.
+# Keep the release zip self-contained so a clean Windows machine does not
+# depend on a separately installed Visual C++ redistributable.
+$redistRoots = @(
+  $env:VCToolsRedistDir,
+  (Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio"),
+  (Join-Path $env:ProgramFiles "Microsoft Visual Studio")
+) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+$crtCandidates = foreach ($rootPath in $redistRoots) {
+  Get-ChildItem -Path $rootPath -Directory -Filter "Microsoft.VC*.CRT" -Recurse -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.FullName -match '\\x64\\Microsoft\.VC\d+\.CRT$' -and
+      $_.FullName -notmatch '\\debug_nonredist\\' -and
+      $_.FullName -notmatch '\\onecore\\'
+    } |
+    ForEach-Object {
+      $runtimeDll = Join-Path $_.FullName "vcruntime140.dll"
+      if (Test-Path -LiteralPath $runtimeDll -PathType Leaf) {
+        $info = (Get-Item -LiteralPath $runtimeDll).VersionInfo
+        [pscustomobject]@{
+          Directory = $_.FullName
+          Version = [version]::new($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart)
+        }
+      }
+    }
+}
+$crt = $crtCandidates | Sort-Object Version -Descending | Select-Object -First 1
+if (-not $crt) {
+  Write-Error "Unable to locate the x64 MSVC release CRT (Microsoft.VC*.CRT)."
+}
+Get-ChildItem $crt.Directory -Filter *.dll | ForEach-Object {
+  Copy-Item -Force $_.FullName $OutDir
+}
+$requiredCrt = @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+$missingCrt = $requiredCrt | Where-Object { -not (Test-Path (Join-Path $OutDir $_)) }
+if ($missingCrt) {
+  Write-Error "MSVC runtime staging incomplete: missing $($missingCrt -join ', ')"
+}
+Write-Host "Copied MSVC CRT $($crt.Version) from $($crt.Directory)"
+
 function Copy-RuntimeDir($Src, $Dst) {
   if (-not (Test-Path $Src)) { return $false }
   New-Item -ItemType Directory -Force -Path $Dst | Out-Null

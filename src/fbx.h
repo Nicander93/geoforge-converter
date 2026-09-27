@@ -34,10 +34,12 @@ struct MeshInstanceInfo {
 
 class FBXLoader {
 public:
-    FBXLoader(const std::string &filename);
+    FBXLoader(const std::string &filename, std::vector<std::string> textureRoots = {}, bool missingTextureIsError = false);
     ~FBXLoader();
 
-    void load();
+    // A false return means the source could not be imported. Callers must not
+    // continue and emit an empty tileset after this boundary.
+    bool load();
 
     osg::ref_ptr<osg::Node> getRoot() const { return _root; }
 
@@ -89,8 +91,15 @@ public:
     DedupStats getStats() const;
 
 private:
+    static bool openExternalFile(void* user, ufbx_stream* stream, const char* path,
+                                 size_t path_length, const ufbx_open_file_info* info);
+    void recordMissingTexture(const ufbx_texture* texture, const char* slot);
+
     ufbx_scene *scene = nullptr;
     std::string source_filename;
+    std::vector<std::string> texture_roots;
+    bool missing_texture_is_error = false;
+    std::unordered_set<std::string> missing_texture_references;
     osg::ref_ptr<osg::Node> _root;
     int material_created_count = 0;
     int material_reused_hash_count = 0;

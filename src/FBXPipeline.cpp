@@ -8,8 +8,12 @@
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
+#include <exception>
 #include <map>
 #include <set>
+#include <cstdlib>
+#include <climits>
+#include <stdexcept>
 
 // Use existing tinygltf if possible, or include it
 #include <osgDB/ReaderWriter>
@@ -26,6 +30,48 @@
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+
+class ProjectedCoordinateContext {
+public:
+    explicit ProjectedCoordinateContext(const PipelineSettings& settings) {
+        double originX = settings.projectedOriginX;
+        double originY = settings.projectedOriginY;
+        if (settings.projectedAxisNorthEastHeight) std::swap(originX, originY);
+
+        constexpr const char* epsgPrefix = "EPSG:";
+        if (settings.projectedSourceCrs.size() > 5 && settings.projectedSourceCrs.compare(0, 5, epsgPrefix) == 0) {
+            const std::string codeText = settings.projectedSourceCrs.substr(5);
+            char* end = nullptr;
+            const long code = std::strtol(codeText.c_str(), &end, 10);
+            if (end == codeText.c_str() || *end != '\0' || code <= 0 || code > INT_MAX) {
+                throw std::runtime_error("projected model config has an invalid EPSG sourceCrs");
+            }
+            coordinateSystem = coords::CoordinateSystem::EPSG(static_cast<int>(code), originX, originY, settings.projectedOriginZ);
+        } else {
+            coordinateSystem = coords::CoordinateSystem::WKT(settings.projectedSourceCrs, originX, originY, settings.projectedOriginZ);
+        }
+
+        transformer = std::make_unique<coords::CoordinateTransformer>(coordinateSystem, coords::GeoReference{});
+        if (!transformer->HasProjectedTransform()) {
+            throw std::runtime_error("failed to initialize PROJ transformation for projected model sourceCrs");
+        }
+        northEastHeight = settings.projectedAxisNorthEastHeight;
+    }
+
+    osg::Vec3d toLocalEnu(const osg::Vec3d& sourcePoint) const {
+        glm::dvec3 point(sourcePoint.x(), sourcePoint.y(), sourcePoint.z());
+        if (northEastHeight) std::swap(point.x, point.y);
+        const glm::dvec3 enu = transformer->ToLocalENU(point);
+        return {enu.x, enu.y, enu.z};
+    }
+
+    glm::dvec3 geoOrigin() const { return transformer->GeoOrigin(); }
+
+private:
+    coords::CoordinateSystem coordinateSystem;
+    std::unique_ptr<coords::CoordinateTransformer> transformer;
+    bool northEastHeight = false;
+};
 
 // Constants
 const uint32_t B3DM_MAGIC = 0x6D643362;
@@ -67,11 +113,27 @@ FBXPipeline::~FBXPipeline() {
     if (rootNode) delete rootNode;
 }
 
-void FBXPipeline::run() {
+bool FBXPipeline::run() {
     LOG_I("Starting FBXPipeline...");
 
-    loader = new FBXLoader(settings.inputPath);
-    loader->load();
+    loader = new FBXLoader(settings.inputPath, settings.textureRoots, settings.missingTextureIsError);
+    if (!loader->load()) {
+        LOG_E("FBX import failed; pipeline will not write a tileset");
+        return false;
+    }
+    if (settings.hasProjectedGeoreference) {
+        try {
+            projectedCoordinates = std::make_unique<ProjectedCoordinateContext>(settings);
+            const glm::dvec3 origin = projectedCoordinates->geoOrigin();
+            settings.longitude = origin.x;
+            settings.latitude = origin.y;
+            settings.height = origin.z;
+            settings.hasGeoreference = true;
+        } catch (const std::exception& error) {
+            LOG_E("Projected model georeference initialization failed: %s", error.what());
+            return false;
+        }
+    }
     LOG_I("FBX Loaded. Mesh Pool Size: %zu", loader->meshPool.size());
     {
         auto stats = loader->getStats();
@@ -128,7 +190,7 @@ void FBXPipeline::run() {
 
     rootNode = new OctreeNode();
 
-    // --- 1. Pre-pass: Detect Outliers ---
+    // --- 1. Pre-pass: collect scene bounds ---
     osg::Vec3d centroid(0,0,0);
     size_t totalInstanceCount = 0;
 
@@ -245,7 +307,7 @@ void FBXPipeline::run() {
 
     // --- 2. Main Pass: Build Root Node & Filter ---
     osg::BoundingBox globalBounds;
-    size_t skippedCount = 0;
+    size_t outlierWarningCount = 0;
 
     for (auto& pair : loader->meshPool) {
         MeshInstanceInfo& info = pair.second;
@@ -255,16 +317,17 @@ void FBXPipeline::run() {
         for (size_t i = 0; i < info.transforms.size(); ++i) {
             const auto& mat = info.transforms[i];
 
-            // Outlier Check
+            // Large model extents are valid for campuses and infrastructure.
+            // Keep every instance by default and make suspicious distances
+            // diagnosable instead of silently deleting source content.
             if (hasOutliers) {
                 osg::Vec3d instCenter = geomBox.center() * mat;
                 double d = (instCenter - centroid).length();
                 if (d > outlierThreshold) {
                     std::string name = (i < info.nodeNames.size()) ? info.nodeNames[i] : "unknown";
-                    LOG_W("Filtering Outlier: '%s' Dist=%.2f Pos=(%.2f, %.2f, %.2f)",
+                    LOG_W("Possible outlier retained: '%s' Dist=%.2f Pos=(%.2f, %.2f, %.2f)",
                           name.c_str(), d, instCenter.x(), instCenter.y(), instCenter.z());
-                    skippedCount++;
-                    continue; // SKIP this instance
+                    outlierWarningCount++;
                 }
             }
 
@@ -281,8 +344,8 @@ void FBXPipeline::run() {
         }
     }
 
-    if (skippedCount > 0) {
-        LOG_I("Filtered %zu outlier instances.", skippedCount);
+    if (outlierWarningCount > 0) {
+        LOG_W("Retained %zu possible outlier instances.", outlierWarningCount);
     }
     rootNode->bbox = globalBounds;
 
@@ -324,6 +387,7 @@ void FBXPipeline::run() {
         LOG_I("Mesh dedup: geometries_created=%d reused_by_hash=%d mesh_cache_hit_count=%d unique_geometries=%zu",
               stats.geometry_created, stats.geometry_hash_reused, stats.mesh_cache_hit_count, stats.unique_geometries);
     }
+    return true;
 }
 
 void FBXPipeline::buildOctree(OctreeNode* node) {
@@ -406,7 +470,7 @@ void FBXPipeline::buildOctree(OctreeNode* node) {
 }
 
 struct TileStats { size_t node_count = 0; size_t vertex_count = 0; size_t triangle_count = 0; size_t material_count = 0; };
-void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef>& instances, const PipelineSettings& settings, json* batchTableJson, int* batchIdCounter, const SimplificationParams& simParams, osg::BoundingBoxd* outBox = nullptr, TileStats* stats = nullptr, const char* dbgTileName = nullptr) {
+void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef>& instances, const PipelineSettings& settings, const ProjectedCoordinateContext* projectedCoordinates, json* batchTableJson, int* batchIdCounter, const SimplificationParams& simParams, osg::BoundingBoxd* outBox = nullptr, TileStats* stats = nullptr, const char* dbgTileName = nullptr) {
     if (instances.empty()) return;
 
     // Ensure model has at least one buffer
@@ -459,6 +523,39 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
             osg::Matrixd normalXform;
             normalXform.transpose(osg::Matrix::inverse(inst.matrix));
 
+            auto emitPosition = [&](osg::Vec3d point) {
+                point = point * inst.matrix;
+                point *= settings.modelUnitToMeters;
+                double gx;
+                double gy;
+                double gz;
+                if (projectedCoordinates) {
+                    const osg::Vec3d enu = projectedCoordinates->toLocalEnu(point);
+                    gx = enu.x();
+                    gy = enu.y();
+                    gz = enu.z();
+                } else {
+                    gx = point.x();
+                    if (settings.modelAxesZUp) {
+                        gy = point.y();
+                        gz = point.z();
+                    } else {
+                        gy = -point.z();
+                        gz = point.y();
+                    }
+                }
+                positions.push_back(static_cast<float>(gx));
+                positions.push_back(static_cast<float>(gy));
+                positions.push_back(static_cast<float>(gz));
+                if (gx < minPos[0]) minPos[0] = gx;
+                if (gy < minPos[1]) minPos[1] = gy;
+                if (gz < minPos[2]) minPos[2] = gz;
+                if (gx > maxPos[0]) maxPos[0] = gx;
+                if (gy > maxPos[1]) maxPos[1] = gy;
+                if (gz > maxPos[2]) maxPos[2] = gz;
+                if (outBox) outBox->expandBy(osg::Vec3d(gx, gy, gz));
+            };
+
             uint32_t baseIndex = (uint32_t)(positions.size() / 3);
             osg::Array* va = processedGeom->getVertexArray();
             osg::Vec3Array* v = dynamic_cast<osg::Vec3Array*>(va);
@@ -485,18 +582,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                                 const float* ptr = static_cast<const float*>(va->getDataPointer());
                                 for (unsigned int i = 0; i < cnt; ++i) {
                                     osg::Vec3d p((double)ptr[i*comps+0], (double)ptr[i*comps+1], (double)ptr[i*comps+2]);
-                                    p = p * inst.matrix;
-                                    float px = (float)p.x();
-                                    float py = (float)-p.z();
-                                    float pz = (float)p.y();
-                                    positions.push_back(px); positions.push_back(py); positions.push_back(pz);
-                                    if (px < minPos[0]) minPos[0] = px;
-                                    if (py < minPos[1]) minPos[1] = py;
-                                    if (pz < minPos[2]) minPos[2] = pz;
-                                    if (px > maxPos[0]) maxPos[0] = px;
-                                    if (py > maxPos[1]) maxPos[1] = py;
-                                    if (pz > maxPos[2]) maxPos[2] = pz;
-                                    if (outBox) outBox->expandBy(osg::Vec3d(px, py, pz));
+                                    emitPosition(p);
                                     if (n && i < n->size()) {
                                         osg::Vec3 nm = (*n)[i];
                                         osg::Vec3d nmd(nm.x(), nm.y(), nm.z());
@@ -566,18 +652,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                                 const double* ptr = static_cast<const double*>(va->getDataPointer());
                                 for (unsigned int i = 0; i < cnt; ++i) {
                                     osg::Vec3d p(ptr[i*comps+0], ptr[i*comps+1], ptr[i*comps+2]);
-                                    p = p * inst.matrix;
-                                    float px = (float)p.x();
-                                    float py = (float)-p.z();
-                                    float pz = (float)p.y();
-                                    positions.push_back(px); positions.push_back(py); positions.push_back(pz);
-                                    if (px < minPos[0]) minPos[0] = px;
-                                    if (py < minPos[1]) minPos[1] = py;
-                                    if (pz < minPos[2]) minPos[2] = pz;
-                                    if (px > maxPos[0]) maxPos[0] = px;
-                                    if (py > maxPos[1]) maxPos[1] = py;
-                                    if (pz > maxPos[2]) maxPos[2] = pz;
-                                    if (outBox) outBox->expandBy(osg::Vec3d(px, py, pz));
+                                    emitPosition(p);
                                     if (n && i < n->size()) {
                                         osg::Vec3 nm = (*n)[i];
                                         osg::Vec3d nmd(nm.x(), nm.y(), nm.z());
@@ -667,18 +742,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                 for (unsigned int i = 0; i < v->size(); ++i) {
                     osg::Vec3 vf = (*v)[i];
                     osg::Vec3d p(vf.x(), vf.y(), vf.z());
-                    p = p * inst.matrix;
-                    float px = (float)p.x();
-                    float py = (float)-p.z();
-                    float pz = (float)p.y();
-                    positions.push_back(px); positions.push_back(py); positions.push_back(pz);
-                    if (px < minPos[0]) minPos[0] = px;
-                    if (py < minPos[1]) minPos[1] = py;
-                    if (pz < minPos[2]) minPos[2] = pz;
-                    if (px > maxPos[0]) maxPos[0] = px;
-                    if (py > maxPos[1]) maxPos[1] = py;
-                    if (pz > maxPos[2]) maxPos[2] = pz;
-                    if (outBox) outBox->expandBy(osg::Vec3d(px, py, pz));
+                    emitPosition(p);
                     if (n && i < n->size()) {
                         osg::Vec3 nmf = (*n)[i];
                         osg::Vec3d nm(nmf.x(), nmf.y(), nmf.z());
@@ -705,18 +769,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
             } else if (v3d && !v3d->empty()) {
                 for (unsigned int i = 0; i < v3d->size(); ++i) {
                     osg::Vec3d p = (*v3d)[i];
-                    p = p * inst.matrix;
-                    float px = (float)p.x();
-                    float py = (float)-p.z();
-                    float pz = (float)p.y();
-                    positions.push_back(px); positions.push_back(py); positions.push_back(pz);
-                    if (px < minPos[0]) minPos[0] = px;
-                    if (py < minPos[1]) minPos[1] = py;
-                    if (pz < minPos[2]) minPos[2] = pz;
-                    if (px > maxPos[0]) maxPos[0] = px;
-                    if (py > maxPos[1]) maxPos[1] = py;
-                    if (pz > maxPos[2]) maxPos[2] = pz;
-                    if (outBox) outBox->expandBy(osg::Vec3d(px, py, pz));
+                    emitPosition(p);
                     if (n3d && i < n3d->size()) {
                         osg::Vec3d nm = (*n3d)[i];
                         nm = osg::Matrix::transform3x3(normalXform, nm); nm.normalize();
@@ -744,21 +797,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                 for (unsigned int i = 0; i < v4->size(); ++i) {
                     osg::Vec4 vf = (*v4)[i];
                     osg::Vec3d p(vf.x(), vf.y(), vf.z());
-                    p = p * inst.matrix;
-                    double gx = p.x();
-                    double gy = -p.z();
-                    double gz = p.y();
-                    float px = (float)gx;
-                    float py = (float)gy;
-                    float pz = (float)gz;
-                    positions.push_back(px); positions.push_back(py); positions.push_back(pz);
-                    if (px < minPos[0]) minPos[0] = px;
-                    if (py < minPos[1]) minPos[1] = py;
-                    if (pz < minPos[2]) minPos[2] = pz;
-                    if (px > maxPos[0]) maxPos[0] = px;
-                    if (py > maxPos[1]) maxPos[1] = py;
-                    if (pz > maxPos[2]) maxPos[2] = pz;
-                    if (outBox) outBox->expandBy(osg::Vec3d(gx, gy, gz));
+                    emitPosition(p);
                     if (n && i < n->size()) {
                         osg::Vec3 nmf = (*n)[i];
                         osg::Vec3d nm(nmf.x(), nmf.y(), nmf.z());
@@ -786,21 +825,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                 for (unsigned int i = 0; i < v4d->size(); ++i) {
                     osg::Vec4d vd = (*v4d)[i];
                     osg::Vec3d p(vd.x(), vd.y(), vd.z());
-                    p = p * inst.matrix;
-                    double gx = p.x();
-                    double gy = -p.z();
-                    double gz = p.y();
-                    float px = (float)gx;
-                    float py = (float)gy;
-                    float pz = (float)gz;
-                    positions.push_back(px); positions.push_back(py); positions.push_back(pz);
-                    if (px < minPos[0]) minPos[0] = px;
-                    if (py < minPos[1]) minPos[1] = py;
-                    if (pz < minPos[2]) minPos[2] = pz;
-                    if (px > maxPos[0]) maxPos[0] = px;
-                    if (py > maxPos[1]) maxPos[1] = py;
-                    if (pz > maxPos[2]) maxPos[2] = pz;
-                    if (outBox) outBox->expandBy(osg::Vec3d(gx, gy, gz));
+                    emitPosition(p);
                     if (n3d && i < n3d->size()) {
                         osg::Vec3d nm = (*n3d)[i];
                         nm = osg::Matrix::transform3x3(normalXform, nm); nm.normalize();
@@ -930,6 +955,51 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                       missingVertexInstances, drawArraysSets);
             }
             continue;
+        }
+        if (projectedCoordinates) {
+            // A projected CRS warp is non-linear, so source-space normals are
+            // no longer valid. Recalculate them from transformed triangles.
+            normals.assign(positions.size(), 0.0f);
+            for (size_t index = 0; index + 2 < indices.size(); index += 3) {
+                const unsigned int ia = indices[index] * 3;
+                const unsigned int ib = indices[index + 1] * 3;
+                const unsigned int ic = indices[index + 2] * 3;
+                if (ic + 2 >= positions.size()) continue;
+                const osg::Vec3d a(positions[ia], positions[ia + 1], positions[ia + 2]);
+                const osg::Vec3d b(positions[ib], positions[ib + 1], positions[ib + 2]);
+                const osg::Vec3d c(positions[ic], positions[ic + 1], positions[ic + 2]);
+                const osg::Vec3d normal = (b - a) ^ (c - a);
+                for (unsigned int vertex : {ia, ib, ic}) {
+                    normals[vertex] += static_cast<float>(normal.x());
+                    normals[vertex + 1] += static_cast<float>(normal.y());
+                    normals[vertex + 2] += static_cast<float>(normal.z());
+                }
+            }
+            for (size_t index = 0; index + 2 < normals.size(); index += 3) {
+                osg::Vec3 normal(normals[index], normals[index + 1], normals[index + 2]);
+                if (normal.length2() > 0.0f) normal.normalize();
+                else normal.set(0.0f, 0.0f, 1.0f);
+                normals[index] = normal.x();
+                normals[index + 1] = normal.y();
+                normals[index + 2] = normal.z();
+            }
+        } else if (settings.modelAxesZUp) {
+            // Source normals were written through the legacy Y-up mapping
+            // (x, -z, y). Restore their direct Z-up form for explicit OBJ
+            // Z-up input without duplicating each vertex-array branch above.
+            for (size_t index = 0; index + 2 < normals.size(); index += 3) {
+                const float legacyY = normals[index + 1];
+                const float legacyZ = normals[index + 2];
+                normals[index + 1] = legacyZ;
+                normals[index + 2] = -legacyY;
+            }
+        }
+        // ufbx exposes FBX/OBJ texture coordinates with a bottom-left origin;
+        // glTF defines (0, 0) at the top-left of the encoded image. Convert
+        // once here for both plain and Draco meshes, keeping image bytes in
+        // their original orientation (including embedded and KTX2 textures).
+        for (size_t index = 1; index < texcoords.size(); index += 2) {
+            texcoords[index] = 1.0f - texcoords[index];
         }
         if (stats) {
             stats->vertex_count += positions.size() / 3;
@@ -1233,8 +1303,8 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                             }
                         }
                     }
-                    if (!hasData && !imgPath.empty() && fs::exists(imgPath)) {
-                        std::ifstream file(imgPath, std::ios::binary | std::ios::ate);
+                    if (!hasData && !imgPath.empty() && fs::exists(fs::u8path(imgPath))) {
+                        std::ifstream file(fs::u8path(imgPath), std::ios::binary | std::ios::ate);
                         if (file) {
                             size_t size = file.tellg();
                             imgData.resize(size);
@@ -1242,7 +1312,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                             file.read(reinterpret_cast<char*>(imgData.data()), size);
                             hasData = true;
 
-                            std::string ext = fs::path(imgPath).extension().string();
+                            std::string ext = fs::u8path(imgPath).extension().string();
                             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                             if (ext == ".jpg" || ext == ".jpeg") mimeType = "image/jpeg";
                         }
@@ -1256,7 +1326,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                         // glTF only supports PNG and JPEG, so always use PNG for other formats
                         std::string ext = "png";
                         if (!imgPath.empty()) {
-                            std::string e = fs::path(imgPath).extension().string();
+                            std::string e = fs::u8path(imgPath).extension().string();
                             if (!e.empty() && e.size() > 1) {
                                 e = e.substr(1); // remove dot
                                 std::transform(e.begin(), e.end(), e.begin(), ::tolower);
@@ -1385,15 +1455,15 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                         }
                     }
 
-                    if (!hasData && !imgPath.empty() && fs::exists(imgPath)) {
-                        std::ifstream file(imgPath, std::ios::binary | std::ios::ate);
+                    if (!hasData && !imgPath.empty() && fs::exists(fs::u8path(imgPath))) {
+                        std::ifstream file(fs::u8path(imgPath), std::ios::binary | std::ios::ate);
                         if (file) {
                             size_t size = file.tellg();
                             imgData.resize(size);
                             file.seekg(0);
                             file.read(reinterpret_cast<char*>(imgData.data()), size);
                             hasData = true;
-                            std::string ext = fs::path(imgPath).extension().string();
+                            std::string ext = fs::u8path(imgPath).extension().string();
                             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                             if (ext == ".jpg" || ext == ".jpeg") mimeType = "image/jpeg";
                         }
@@ -1401,7 +1471,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                     if (!hasData && img->data() != nullptr) {
                         std::string ext = "png";
                         if (!imgPath.empty()) {
-                            std::string e = fs::path(imgPath).extension().string();
+                            std::string e = fs::u8path(imgPath).extension().string();
                             if (!e.empty() && e.size() > 1) {
                                 ext = e.substr(1);
                                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
@@ -1503,15 +1573,15 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                         }
                     }
 
-                    if (!hasData && !imgPath.empty() && fs::exists(imgPath)) {
-                        std::ifstream file(imgPath, std::ios::binary | std::ios::ate);
+                    if (!hasData && !imgPath.empty() && fs::exists(fs::u8path(imgPath))) {
+                        std::ifstream file(fs::u8path(imgPath), std::ios::binary | std::ios::ate);
                         if (file) {
                             size_t size = file.tellg();
                             imgData.resize(size);
                             file.seekg(0);
                             file.read(reinterpret_cast<char*>(imgData.data()), size);
                             hasData = true;
-                            std::string ext = fs::path(imgPath).extension().string();
+                            std::string ext = fs::u8path(imgPath).extension().string();
                             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                             if (ext == ".jpg" || ext == ".jpeg") mimeType = "image/jpeg";
                         }
@@ -1519,7 +1589,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                     if (!hasData && img->data() != nullptr) {
                         std::string ext = "png";
                         if (!imgPath.empty()) {
-                            std::string e = fs::path(imgPath).extension().string();
+                            std::string e = fs::u8path(imgPath).extension().string();
                             if (!e.empty() && e.size() > 1) {
                                 ext = e.substr(1);
                                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
@@ -1982,7 +2052,7 @@ std::pair<std::string, osg::BoundingBoxd> FBXPipeline::createB3DM(const std::vec
     osg::BoundingBoxd contentBox;
 
     TileStats tileStats;
-    appendGeometryToModel(model, instances, settings, &batchTableJson, &batchIdCounter, simParams, &contentBox, &tileStats, tileName.c_str());
+    appendGeometryToModel(model, instances, settings, projectedCoordinates.get(), &batchTableJson, &batchIdCounter, simParams, &contentBox, &tileStats, tileName.c_str());
     LOG_I("Tile %s: nodes=%zu triangles=%zu vertices=%zu materials=%zu", tileName.c_str(), tileStats.node_count, tileStats.triangle_count, tileStats.vertex_count, tileStats.material_count);
 
     // Populate Batch Table with node names and attributes
@@ -2035,11 +2105,11 @@ std::pair<std::string, osg::BoundingBoxd> FBXPipeline::createB3DM(const std::vec
 
     // 2. Create B3DM wrapping GLB
     std::string filename = tileName + ".b3dm";
-    std::string fullPath = (fs::path(tilePath) / filename).string();
+    const fs::path fullPath = fs::u8path(tilePath) / filename;
 
     std::ofstream outfile(fullPath, std::ios::binary);
     if (!outfile) {
-        LOG_E("Failed to create B3DM file: %s", fullPath.c_str());
+        LOG_E("Failed to create B3DM file: %s", fullPath.u8string().c_str());
         return {"", contentBox};
     }
 
@@ -2237,40 +2307,39 @@ void FBXPipeline::writeTilesetJson(const std::string& basePath, const osg::Bound
     }
 
     // Always add Transform to anchor local ENU coordinates to ECEF
-    if (settings.longitude != 0.0 || settings.latitude != 0.0 || settings.height != 0.0) {
+    if (settings.hasGeoreference) {
         glm::dmat4 enuToEcef = coords::CoordinateTransformer::CalcEnuToEcefMatrix(settings.longitude, settings.latitude, settings.height);
 
-        // Calculate center of the model (in original local coordinates - Y-up from FBX)
-        double cx = (globalBounds.xMin() + globalBounds.xMax()) * 0.5;
-        double cy = (globalBounds.yMin() + globalBounds.yMax()) * 0.5;
-        double cz = (globalBounds.zMin() + globalBounds.zMax()) * 0.5;
+        if (settings.hasProjectedGeoreference) {
+            const double* m = (const double*)&enuToEcef;
+            tileset["root"]["transform"] = {
+                m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+                m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]
+            };
+            LOG_I("Applied projected root transform from source CRS %s", settings.projectedSourceCrs.c_str());
+            std::ofstream out(fs::u8path(basePath) / "tileset.json");
+            out << tileset.dump(4);
+            return;
+        }
 
-        // The geometry is in Z-up coordinates (x, -z, y) in B3DM.
-        // Model center in Z-up: (cx, -cz, cy)
-        //
-        // ENU_to_ECEF maps ENU origin (0,0,0) to target lon/lat/height.
-        // To place model center at target position, we need ENU origin to be at model center.
-        //
-        // In ENU coordinates (Z-up), model center is at (cx, -cz, cy).
-        // So we need to shift ENU origin by (cx, -cz, cy) in the ENU frame.
-        //
-        // This is equivalent to: transform = ENU_to_ECEF * translate(cx, -cz, cy)
-        // Which shifts the ENU origin so that model center maps to target position.
-
-        // Apply translation to ENU origin (in ENU frame, then rotated to ECEF)
-        // glm is column-major
-        // Translation in ENU frame: (cx, -cz, cy)
-        // After ENU_to_ECEF rotation, this becomes a translation in ECEF
-        double tx = cx;
-        double ty = -cz;  // Z-up: y is north, FBX z becomes -y in Z-up
-        double tz = cy;   // FBX y becomes z in Z-up
+        // rootContent uses the same normalized coordinate space as B3DM
+        // positions, including explicit OBJ units and axes. Deriving the
+        // anchor translation here prevents a source-space/output-space split.
+        const auto& box = rootContent["boundingVolume"]["box"];
+        if (!box.is_array() || box.size() != 12) {
+            LOG_E("Cannot anchor model: root boundingVolume.box is invalid");
+            return;
+        }
+        const double tx = box[0];
+        const double ty = box[1];
+        const double tz = box[2];
 
         // Add translation to the transform (ENU_to_ECEF * translation)
         enuToEcef[3][0] += tx * enuToEcef[0][0] + ty * enuToEcef[1][0] + tz * enuToEcef[2][0];
         enuToEcef[3][1] += tx * enuToEcef[0][1] + ty * enuToEcef[1][1] + tz * enuToEcef[2][1];
         enuToEcef[3][2] += tx * enuToEcef[0][2] + ty * enuToEcef[1][2] + tz * enuToEcef[2][2];
 
-        LOG_I("Model center Y-up: (%.2f, %.2f, %.2f), Z-up: (%.2f, %.2f, %.2f)", cx, cy, cz, tx, ty, tz);
+        LOG_I("Model center in normalized local coordinates: (%.2f, %.2f, %.2f)", tx, ty, tz);
 
         const double* m = (const double*)&enuToEcef;
         tileset["root"]["transform"] = {
@@ -2285,7 +2354,7 @@ void FBXPipeline::writeTilesetJson(const std::string& basePath, const osg::Bound
     }
 
     std::string s = tileset.dump(4);
-    std::ofstream out(fs::path(basePath) / "tileset.json");
+    std::ofstream out(fs::u8path(basePath) / "tileset.json");
     out << s;
     out.close();
 }
@@ -2448,7 +2517,17 @@ extern "C" void* fbx23dtile(
     bool enable_unlit,
     double longitude,
     double latitude,
-    double height
+    double height,
+    bool has_georeference,
+    const char* projected_source_crs,
+    bool projected_axis_north_east_height,
+    double projected_origin_x,
+    double projected_origin_y,
+    double projected_origin_z,
+    double model_unit_to_meters,
+    bool model_axes_z_up,
+    const char* texture_roots_json,
+    bool missing_texture_is_error
 ) {
     std::string input(in_path);
     std::string output(out_path);
@@ -2465,13 +2544,49 @@ extern "C" void* fbx23dtile(
     settings.longitude = longitude;
     settings.latitude = latitude;
     settings.height = height;
+    settings.hasGeoreference = has_georeference;
+    settings.hasProjectedGeoreference = projected_source_crs != nullptr && projected_source_crs[0] != '\0';
+    settings.modelUnitToMeters = model_unit_to_meters;
+    settings.modelAxesZUp = model_axes_z_up;
+    if (texture_roots_json != nullptr && texture_roots_json[0] != '\0') {
+        const auto roots = nlohmann::json::parse(texture_roots_json, nullptr, false);
+        if (roots.is_discarded() || !roots.is_array()) {
+            LOG_E("Texture roots configuration must be a JSON array");
+            return nullptr;
+        }
+        for (const auto& root : roots) {
+            if (!root.is_string()) {
+                LOG_E("Texture roots configuration entries must be strings");
+                return nullptr;
+            }
+            settings.textureRoots.push_back(root.get<std::string>());
+        }
+    }
+    settings.missingTextureIsError = missing_texture_is_error;
+    if (settings.hasProjectedGeoreference) {
+        settings.projectedSourceCrs = projected_source_crs;
+        settings.projectedAxisNorthEastHeight = projected_axis_north_east_height;
+        settings.projectedOriginX = projected_origin_x;
+        settings.projectedOriginY = projected_origin_y;
+        settings.projectedOriginZ = projected_origin_z;
+    }
 
-    FBXPipeline pipeline(settings);
-    pipeline.run();
+    try {
+        FBXPipeline pipeline(settings);
+        if (!pipeline.run()) {
+            return nullptr;
+        }
+    } catch (const std::exception& error) {
+        LOG_E("FBX pipeline failed: %s", error.what());
+        return nullptr;
+    } catch (...) {
+        LOG_E("FBX pipeline failed with an unknown native exception");
+        return nullptr;
+    }
 
-    fs::path tilesetPath = fs::path(output) / "tileset.json";
+    fs::path tilesetPath = fs::u8path(output) / "tileset.json";
     if (!fs::exists(tilesetPath)) {
-        LOG_E("Failed to generate tileset.json at %s", tilesetPath.string().c_str());
+        LOG_E("Failed to generate tileset.json at %s", tilesetPath.u8string().c_str());
         return nullptr;
     }
 

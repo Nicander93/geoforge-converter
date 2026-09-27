@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <exception>
 
 // Add Basis Universal includes for KTX2 compression
 #include <basisu/encoder/basisu_comp.h>
@@ -349,22 +350,25 @@ std::string normalize_path(const char* path)
 }
 
 std::string osg_string ( const char* path ) {
-    #ifdef WIN32
+    // The bundled OSG build uses OSG_USE_UTF8_FILENAME and therefore expects
+    // UTF-8 paths on Windows. Converting those bytes to the system code page
+    // first corrupts CJK paths before OSG opens the file.
+    #if defined(WIN32) && !defined(OSG_USE_UTF8_FILENAME)
         std::string root_path =
         osgDB::convertStringFromUTF8toCurrentCodePage(normalize_path(path));
     #else
-        std::string root_path = (path);
-    #endif // WIN32
+        std::string root_path = normalize_path(path);
+    #endif
     return root_path;
 }
 
 std::string utf8_string (const char* path) {
-    #ifdef WIN32
+    #if defined(WIN32) && !defined(OSG_USE_UTF8_FILENAME)
         std::string utf8 =
         osgDB::convertStringFromCurrentCodePageToUTF8(path);
     #else
         std::string utf8 = (path);
-    #endif // WIN32
+    #endif
     return utf8;
 }
 
@@ -396,7 +400,10 @@ int get_lvl_num(std::string file_name){
     return -1;
 }
 
-osg_tree get_all_tree(std::string& file_name) {
+osg_tree get_all_tree(std::string& file_name, bool* read_error = nullptr) {
+    if (read_error) {
+        *read_error = false;
+    }
     osg_tree root_tile;
     vector<string> fileNames = { file_name };
 
@@ -413,6 +420,9 @@ osg_tree get_all_tree(std::string& file_name) {
         if (!root) {
             std::string name = utf8_string(file_name.c_str());
             LOG_E("read node files [%s] fail!", name.c_str());
+            if (read_error) {
+                *read_error = true;
+            }
             return root_tile;
         }
         root_tile.file_name = file_name;
@@ -421,7 +431,15 @@ osg_tree get_all_tree(std::string& file_name) {
     }
 
     for (auto& i : infoVisitor.sub_node_names) {
-        osg_tree tree = get_all_tree(i);
+        bool child_read_error = false;
+        osg_tree tree = get_all_tree(i, &child_read_error);
+        if (child_read_error) {
+            if (read_error) {
+                *read_error = true;
+            }
+            root_tile.file_name.clear();
+            return root_tile;
+        }
         if (!tree.file_name.empty()) {
             // When the node type is Group, simply add its child nodes to the current node
             if (tree.type == 0) {
@@ -432,6 +450,19 @@ osg_tree get_all_tree(std::string& file_name) {
                 root_tile.sub_nodes.push_back(tree);
             }
         }
+    }
+
+    // Some real ContextCapture exports contain tiny placeholder OSGB nodes
+    // with no geometry (for example an empty leaf at the edge of a block).
+    // Treat a node with neither geometry nor usable descendants as an empty
+    // leaf so its parent can omit it.  Returning an empty tree here keeps the
+    // batch conversion alive while still logging the exact source path.
+    if (infoVisitor.geometry_array.empty() &&
+        infoVisitor.other_geometry_array.empty() &&
+        root_tile.sub_nodes.empty()) {
+        std::string name = utf8_string(file_name.c_str());
+        LOG_W("skipping empty OSGB node [%s]", name.c_str());
+        root_tile.file_name.clear();
     }
 
     // When the node contains PagedLOD and Other nodes, create a new group node
@@ -784,7 +815,7 @@ struct PrimitiveState
     int textcdAccessor;
 };
 
-void write_element_array_primitive(osg::Geometry* g, osg::PrimitiveSet* ps,
+bool write_element_array_primitive(osg::Geometry* g, osg::PrimitiveSet* ps,
                                    OsgBuildState* osgState, PrimitiveState* pmtState,
                                    DracoState* dracoState) {
   tinygltf::Primitive primits;
@@ -866,8 +897,7 @@ void write_element_array_primitive(osg::Geometry* g, osg::PrimitiveSet* ps,
     }
     default: {
       LOG_E("unsupport osg::PrimitiveSet::Type [%d]", t);
-      exit(1);
-      break;
+      return false;
     }
   }
   // vertex: full vertex and part indecis
@@ -1008,8 +1038,7 @@ void write_element_array_primitive(osg::Geometry* g, osg::PrimitiveSet* ps,
       break;
     default:
       LOG_E("Unsupport Primitive Mode: %d", (int)ps->getMode());
-      exit(1);
-      break;
+      return false;
   }
   osgState->model->meshes.back().primitives.push_back(primits);
   if (dracoState && dracoState->compressed) {
@@ -1024,10 +1053,14 @@ void write_element_array_primitive(osg::Geometry* g, osg::PrimitiveSet* ps,
     dracoExt["attributes"] = tinygltf::Value(dracoAttribs);
     backPrim.extensions["KHR_draco_mesh_compression"] = tinygltf::Value(dracoExt);
   }
+  return true;
 }
 
-void write_osgGeometry(osg::Geometry* g, OsgBuildState* osgState, bool enable_simplify, bool enable_draco)
+bool write_osgGeometry(osg::Geometry* g, OsgBuildState* osgState, bool enable_simplify, bool enable_draco)
 {
+    if (g == nullptr || g->getNumPrimitiveSets() == 0) {
+        return false;
+    }
     if (enable_simplify) {
         const SimplificationParams simplication_params = { .enable_simplification = true };
         ::simplify_mesh_geometry(g, simplication_params);
@@ -1070,8 +1103,11 @@ void write_osgGeometry(osg::Geometry* g, OsgBuildState* osgState, bool enable_si
     //   LOG_E("PrimitiveSets type are NOT same in osgb");
     //   exit(1);
     // }
-    write_element_array_primitive(g, ps, osgState, &pmtState, &dracoState);
+    if (!write_element_array_primitive(g, ps, osgState, &pmtState, &dracoState)) {
+      return false;
+    }
   }
+  return true;
 }
 
 bool osgb2glb_buf(std::string path, std::string& glb_buff, MeshInfo& mesh_info, int node_type, bool enable_texture_compress = false, bool enable_meshopt = false, bool enable_draco = false, bool enable_unlit = true) {
@@ -1117,7 +1153,10 @@ bool osgb2glb_buf(std::string path, std::string& glb_buff, MeshInfo& mesh_info, 
         if (!g->getVertexArray() || g->getVertexArray()->getDataSize() == 0)
             continue;
 
-        write_osgGeometry(g, &osgState, enable_meshopt, enable_draco);
+        if (!write_osgGeometry(g, &osgState, enable_meshopt, enable_draco)) {
+            LOG_E("unsupported primitive in %s", path.c_str());
+            return false;
+        }
         // update primitive material index
         if (infoVisitor.texture_array.size())
         {
@@ -1375,19 +1414,25 @@ std::vector<double> convert_bbox(TileBox tile) {
     return v;
 }
 
-void do_tile_job(osg_tree& tree, std::string out_path, int max_lvl, bool enable_texture_compress = false, bool enable_meshopt = false, bool enable_draco = false, bool enable_unlit = true) {
+bool do_tile_job(osg_tree& tree, std::string out_path, int max_lvl, bool enable_texture_compress = false, bool enable_meshopt = false, bool enable_draco = false, bool enable_unlit = true) {
     std::string json_str;
-    if (tree.file_name.empty()) return;
+    if (tree.file_name.empty()) return true;
     int lvl = get_lvl_num(tree.file_name);
-    if (lvl > max_lvl) return;
+    if (lvl > max_lvl) return true;
     if (tree.type > 0) {
         std::string b3dm_buf;
-        osgb2b3dm_buf(tree.file_name, b3dm_buf, tree.bbox, tree.type, enable_texture_compress, enable_meshopt, enable_draco, enable_unlit);
+        if (!osgb2b3dm_buf(tree.file_name, b3dm_buf, tree.bbox, tree.type, enable_texture_compress, enable_meshopt, enable_draco, enable_unlit)) {
+            LOG_E("failed to convert tile %s", tree.file_name.c_str());
+            return false;
+        }
         std::string out_file = out_path;
         out_file += "/";
         out_file += replace(get_file_name(tree.file_name), ".osgb", tree.type != 2 ? ".b3dm" : "o.b3dm");
         if (!b3dm_buf.empty()) {
-            write_file(out_file.c_str(), b3dm_buf.data(), b3dm_buf.size());
+            if (!write_file(out_file.c_str(), b3dm_buf.data(), b3dm_buf.size())) {
+                LOG_E("failed to write tile %s", out_file.c_str());
+                return false;
+            }
         }
         // test
         // std::string glb_buf;
@@ -1398,8 +1443,11 @@ void do_tile_job(osg_tree& tree, std::string out_path, int max_lvl, bool enable_
         // end test
     }
     for (auto& i : tree.sub_nodes) {
-        do_tile_job(i,out_path,max_lvl, enable_texture_compress, enable_meshopt, enable_draco, enable_unlit);
+        if (!do_tile_job(i,out_path,max_lvl, enable_texture_compress, enable_meshopt, enable_draco, enable_unlit)) {
+            return false;
+        }
     }
+    return true;
 }
 
 void expend_box(TileBox& box, TileBox& box_new) {
@@ -1488,7 +1536,7 @@ encode_tile_json(osg_tree& tree, double x, double y)
     if (tree.bbox.max.empty() || tree.bbox.min.empty())
         return "";
 
-    std::string file_name = get_file_name(tree.file_name);
+    std::string file_name = utf8_string(get_file_name(tree.file_name).c_str());
     std::string parent_str = get_parent(tree.file_name);
     std::string file_path = get_file_name(parent_str);
 
@@ -1511,9 +1559,8 @@ encode_tile_json(osg_tree& tree, double x, double y)
         std::string uri_path = "./";
         uri_path += file_name;
         std::string uri = replace(uri_path, ".osgb", tree.type != 2 ? ".b3dm" : "o.b3dm");
-        tile += "\"";
-        tile += uri;
-        tile += "\",";
+        tile += nlohmann::json(uri).dump();
+        tile += ",";
         tile += content_box;
         tile += "}";
     }
@@ -1543,14 +1590,25 @@ osgb23dtile_path(const char* in_path, const char* out_path,
                     int max_lvl,
                     bool enable_texture_compress = false, bool enable_meshopt = false, bool enable_draco = false, bool enable_unlit = true)
 {
+    if (!in_path || !out_path || !box || !len || max_lvl < 0 ||
+        !std::isfinite(x) || !std::isfinite(y)) {
+        LOG_E("invalid OSGB conversion arguments");
+        return NULL;
+    }
+    *len = 0;
+    try {
     std::string path = osg_string(in_path);
-    osg_tree root = get_all_tree(path);
-    if (root.file_name.empty())
+    bool read_error = false;
+    osg_tree root = get_all_tree(path, &read_error);
+    if (read_error || root.file_name.empty())
     {
         LOG_E( "open file [%s] fail!", in_path);
         return NULL;
     }
-    do_tile_job(root, out_path, max_lvl, enable_texture_compress, enable_meshopt, enable_draco, enable_unlit);
+    if (!do_tile_job(root, out_path, max_lvl, enable_texture_compress, enable_meshopt, enable_draco, enable_unlit)) {
+        LOG_E("tile conversion failed for [%s]", in_path);
+        return NULL;
+    }
     extend_tile_box(root);
     if (root.bbox.max.empty() || root.bbox.min.empty())
     {
@@ -1560,18 +1618,38 @@ osgb23dtile_path(const char* in_path, const char* out_path,
     // prevent for root node disappear
     calc_geometric_error(root);
     std::string json = encode_tile_json(root, x, y);
+    if (json.empty() || json.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        LOG_E("generated tile JSON is empty or too large for [%s]", in_path);
+        return NULL;
+    }
     root.bbox.extend(0.2);
     memcpy(box, root.bbox.max.data(), 3 * sizeof(double));
     memcpy(box + 3, root.bbox.min.data(), 3 * sizeof(double));
     void* str = malloc(json.length());
+    if (!str) {
+        LOG_E("failed to allocate tile JSON for [%s]", in_path);
+        return NULL;
+    }
     memcpy(str, json.c_str(), json.length());
-    *len = json.length();
+    *len = static_cast<int>(json.length());
     return str;
+    } catch (const std::exception& error) {
+        LOG_E("native OSGB conversion exception for [%s]: %s", in_path ? in_path : "<null>", error.what());
+        return NULL;
+    } catch (...) {
+        LOG_E("native OSGB conversion unknown exception for [%s]", in_path ? in_path : "<null>");
+        return NULL;
+    }
 }
 
 extern "C" bool
 osgb2glb(const char* in, const char* out)
 {
+    if (!in || !out) {
+        LOG_E("invalid GLB conversion arguments");
+        return false;
+    }
+    try {
     MeshInfo minfo;
     std::string glb_buf;
     std::string path = osg_string(in);
@@ -1589,4 +1667,11 @@ osgb2glb(const char* in, const char* out)
         return false;
     }
     return true;
+    } catch (const std::exception& error) {
+        LOG_E("native GLB conversion exception: %s", error.what());
+        return false;
+    } catch (...) {
+        LOG_E("native GLB conversion unknown exception");
+        return false;
+    }
 }

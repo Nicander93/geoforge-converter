@@ -9,11 +9,14 @@
 #include <nlohmann/json.hpp>
 #include "mesh_processor.h"
 #include <unordered_map>
+#include <memory>
 
 // Forward declarations
 namespace tinygltf {
     class Model;
 }
+
+class ProjectedCoordinateContext;
 
 struct PipelineSettings {
     std::string inputPath;
@@ -33,6 +36,21 @@ struct PipelineSettings {
     double longitude = 0.0;
     double latitude = 0.0;
     double height = 0.0;
+    bool hasGeoreference = false;
+
+    bool hasProjectedGeoreference = false;
+    std::string projectedSourceCrs;
+    bool projectedAxisNorthEastHeight = false;
+    double projectedOriginX = 0.0;
+    double projectedOriginY = 0.0;
+    double projectedOriginZ = 0.0;
+
+    // Model-space normalization. FBX is normalized by ufbx during import;
+    // OBJ supplies these explicitly through the model config contract.
+    double modelUnitToMeters = 1.0;
+    bool modelAxesZUp = false;
+    std::vector<std::string> textureRoots;
+    bool missingTextureIsError = false;
 
     // Geometric error scale (multiplier applied to boundingVolume diagonal)
     double geScale = 0.5; // Adjusted for better LOD switching with SSE=16
@@ -51,11 +69,12 @@ public:
     FBXPipeline(const PipelineSettings& settings);
     ~FBXPipeline();
 
-    void run();
+    bool run();
 
 private:
     PipelineSettings settings;
     FBXLoader* loader = nullptr;
+    std::unique_ptr<ProjectedCoordinateContext> projectedCoordinates;
     struct LevelAccum { size_t count = 0; double sumDiag = 0.0; double sumGe = 0.0; size_t tightCount = 0; size_t fallbackCount = 0; size_t refineAdd = 0; size_t refineReplace = 0; };
     std::unordered_map<int, LevelAccum> levelStats;
 
