@@ -157,7 +157,15 @@ pub fn osgb_batch_convert(
 
     let max_lvl: i32 = max_lvl.unwrap_or(100);
     let thread_count = convert_threads();
-    log::info!("OSGB conversion using {} worker threads", thread_count);
+    log::info!(
+        "OSGB conversion config: threads={}, max_lvl={}, texture_compress={}, meshopt={}, draco={}, unlit={}",
+        thread_count,
+        max_lvl,
+        enable_texture_compress,
+        enable_meshopt,
+        enable_draco_compress,
+        enable_unlit
+    );
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(thread_count)
         .build()?;
