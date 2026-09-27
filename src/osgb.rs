@@ -4,6 +4,7 @@ extern crate serde;
 extern crate serde_json;
 
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -342,7 +343,7 @@ pub fn osgb_batch_convert(
 
     worker_result?;
 
-    if manifest.blocks().is_empty() {
+    if manifest.succeeded_blocks().is_empty() {
         return Err("no blocks were successfully converted".into());
     }
 
@@ -473,8 +474,12 @@ fn process_block(
     let tileset_path = staging_dir.join("tileset.json");
     let mut f = File::create(&tileset_path)
         .map_err(|e| format!("failed to create tileset for {}: {}", ctx.job.id, e))?;
-    f.write_all(serde_json::to_string_pretty(&tileset_json)?.as_bytes())
-        .map_err(|e| format!("failed to write tileset for {}: {}", ctx.job.id, e))?;
+    f.write_all(
+        serde_json::to_string_pretty(&tileset_json)
+            .map_err(|e| format!("failed to serialize tileset for {}: {}", ctx.job.id, e))?
+            .as_bytes(),
+    )
+    .map_err(|e| format!("failed to write tileset for {}: {}", ctx.job.id, e))?;
     f.sync_all()
         .map_err(|e| format!("failed to sync tileset for {}: {}", ctx.job.id, e))?;
     drop(f);
