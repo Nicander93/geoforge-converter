@@ -994,6 +994,13 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                 normals[index + 2] = -legacyY;
             }
         }
+        // ufbx exposes FBX/OBJ texture coordinates with a bottom-left origin;
+        // glTF defines (0, 0) at the top-left of the encoded image. Convert
+        // once here for both plain and Draco meshes, keeping image bytes in
+        // their original orientation (including embedded and KTX2 textures).
+        for (size_t index = 1; index < texcoords.size(); index += 2) {
+            texcoords[index] = 1.0f - texcoords[index];
+        }
         if (stats) {
             stats->vertex_count += positions.size() / 3;
             stats->triangle_count += indices.size() / 3;
@@ -1296,8 +1303,8 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                             }
                         }
                     }
-                    if (!hasData && !imgPath.empty() && fs::exists(imgPath)) {
-                        std::ifstream file(imgPath, std::ios::binary | std::ios::ate);
+                    if (!hasData && !imgPath.empty() && fs::exists(fs::u8path(imgPath))) {
+                        std::ifstream file(fs::u8path(imgPath), std::ios::binary | std::ios::ate);
                         if (file) {
                             size_t size = file.tellg();
                             imgData.resize(size);
@@ -1305,7 +1312,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                             file.read(reinterpret_cast<char*>(imgData.data()), size);
                             hasData = true;
 
-                            std::string ext = fs::path(imgPath).extension().string();
+                            std::string ext = fs::u8path(imgPath).extension().string();
                             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                             if (ext == ".jpg" || ext == ".jpeg") mimeType = "image/jpeg";
                         }
@@ -1319,7 +1326,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                         // glTF only supports PNG and JPEG, so always use PNG for other formats
                         std::string ext = "png";
                         if (!imgPath.empty()) {
-                            std::string e = fs::path(imgPath).extension().string();
+                            std::string e = fs::u8path(imgPath).extension().string();
                             if (!e.empty() && e.size() > 1) {
                                 e = e.substr(1); // remove dot
                                 std::transform(e.begin(), e.end(), e.begin(), ::tolower);
@@ -1448,15 +1455,15 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                         }
                     }
 
-                    if (!hasData && !imgPath.empty() && fs::exists(imgPath)) {
-                        std::ifstream file(imgPath, std::ios::binary | std::ios::ate);
+                    if (!hasData && !imgPath.empty() && fs::exists(fs::u8path(imgPath))) {
+                        std::ifstream file(fs::u8path(imgPath), std::ios::binary | std::ios::ate);
                         if (file) {
                             size_t size = file.tellg();
                             imgData.resize(size);
                             file.seekg(0);
                             file.read(reinterpret_cast<char*>(imgData.data()), size);
                             hasData = true;
-                            std::string ext = fs::path(imgPath).extension().string();
+                            std::string ext = fs::u8path(imgPath).extension().string();
                             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                             if (ext == ".jpg" || ext == ".jpeg") mimeType = "image/jpeg";
                         }
@@ -1464,7 +1471,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                     if (!hasData && img->data() != nullptr) {
                         std::string ext = "png";
                         if (!imgPath.empty()) {
-                            std::string e = fs::path(imgPath).extension().string();
+                            std::string e = fs::u8path(imgPath).extension().string();
                             if (!e.empty() && e.size() > 1) {
                                 ext = e.substr(1);
                                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
@@ -1566,15 +1573,15 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                         }
                     }
 
-                    if (!hasData && !imgPath.empty() && fs::exists(imgPath)) {
-                        std::ifstream file(imgPath, std::ios::binary | std::ios::ate);
+                    if (!hasData && !imgPath.empty() && fs::exists(fs::u8path(imgPath))) {
+                        std::ifstream file(fs::u8path(imgPath), std::ios::binary | std::ios::ate);
                         if (file) {
                             size_t size = file.tellg();
                             imgData.resize(size);
                             file.seekg(0);
                             file.read(reinterpret_cast<char*>(imgData.data()), size);
                             hasData = true;
-                            std::string ext = fs::path(imgPath).extension().string();
+                            std::string ext = fs::u8path(imgPath).extension().string();
                             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                             if (ext == ".jpg" || ext == ".jpeg") mimeType = "image/jpeg";
                         }
@@ -1582,7 +1589,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                     if (!hasData && img->data() != nullptr) {
                         std::string ext = "png";
                         if (!imgPath.empty()) {
-                            std::string e = fs::path(imgPath).extension().string();
+                            std::string e = fs::u8path(imgPath).extension().string();
                             if (!e.empty() && e.size() > 1) {
                                 ext = e.substr(1);
                                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
@@ -2098,11 +2105,11 @@ std::pair<std::string, osg::BoundingBoxd> FBXPipeline::createB3DM(const std::vec
 
     // 2. Create B3DM wrapping GLB
     std::string filename = tileName + ".b3dm";
-    std::string fullPath = (fs::path(tilePath) / filename).string();
+    const fs::path fullPath = fs::u8path(tilePath) / filename;
 
     std::ofstream outfile(fullPath, std::ios::binary);
     if (!outfile) {
-        LOG_E("Failed to create B3DM file: %s", fullPath.c_str());
+        LOG_E("Failed to create B3DM file: %s", fullPath.u8string().c_str());
         return {"", contentBox};
     }
 
@@ -2310,7 +2317,7 @@ void FBXPipeline::writeTilesetJson(const std::string& basePath, const osg::Bound
                 m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]
             };
             LOG_I("Applied projected root transform from source CRS %s", settings.projectedSourceCrs.c_str());
-            std::ofstream out(fs::path(basePath) / "tileset.json");
+            std::ofstream out(fs::u8path(basePath) / "tileset.json");
             out << tileset.dump(4);
             return;
         }
@@ -2347,7 +2354,7 @@ void FBXPipeline::writeTilesetJson(const std::string& basePath, const osg::Bound
     }
 
     std::string s = tileset.dump(4);
-    std::ofstream out(fs::path(basePath) / "tileset.json");
+    std::ofstream out(fs::u8path(basePath) / "tileset.json");
     out << s;
     out.close();
 }
@@ -2577,9 +2584,9 @@ extern "C" void* fbx23dtile(
         return nullptr;
     }
 
-    fs::path tilesetPath = fs::path(output) / "tileset.json";
+    fs::path tilesetPath = fs::u8path(output) / "tileset.json";
     if (!fs::exists(tilesetPath)) {
-        LOG_E("Failed to generate tileset.json at %s", tilesetPath.string().c_str());
+        LOG_E("Failed to generate tileset.json at %s", tilesetPath.u8string().c_str());
         return nullptr;
     }
 

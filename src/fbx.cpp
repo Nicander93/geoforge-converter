@@ -19,9 +19,12 @@
 
 #include <ufbx.h>
 #include <cstdint>
+#include <array>
 #include <cstdio>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -55,7 +58,8 @@ static osg::Image* createImageFromSTB(unsigned char* imgData, int width, int hei
 
     if (image) {
         image->setFileName(filename.empty() ? "image.png" : filename);
-        image->flipVertical();
+        // Keep decoded pixels in file order. GLB stores the original image
+        // and converts FBX's bottom-left UVs to glTF's top-left convention.
     }
     return image;
 }
@@ -156,14 +160,14 @@ static std::filesystem::path resolve_texture_path(const std::string &fbxPath,
     return {};
   }
 
-  std::filesystem::path p(path);
+  std::filesystem::path p = std::filesystem::u8path(path);
   if (p.is_absolute() && std::filesystem::exists(p)) {
       return p;
   }
 
   // Try relative to FBX file
   if (!fbxPath.empty()) {
-      std::filesystem::path fbxDir = std::filesystem::path(fbxPath).parent_path();
+      std::filesystem::path fbxDir = std::filesystem::u8path(fbxPath).parent_path();
       std::filesystem::path relPath = fbxDir / p;
       if (std::filesystem::exists(relPath)) {
           return relPath;
@@ -175,12 +179,12 @@ static std::filesystem::path resolve_texture_path(const std::string &fbxPath,
           return flatPath;
       }
   }
-  std::filesystem::path rootRelative = ufbx_string_to_std(tex->relative_filename);
+  std::filesystem::path rootRelative = std::filesystem::u8path(ufbx_string_to_std(tex->relative_filename));
   if (rootRelative.is_absolute() && !fbxPath.empty()) {
-      rootRelative = rootRelative.lexically_relative(std::filesystem::path(fbxPath).parent_path());
+      rootRelative = rootRelative.lexically_relative(std::filesystem::u8path(fbxPath).parent_path());
   }
   for (const auto& root : textureRoots) {
-      const std::filesystem::path rootPath(root);
+      const std::filesystem::path rootPath = std::filesystem::u8path(root);
       if (!rootRelative.empty() && !rootRelative.is_absolute()) {
           std::filesystem::path candidate = rootPath / rootRelative;
           if (std::filesystem::exists(candidate)) return candidate;
@@ -192,6 +196,52 @@ static std::filesystem::path resolve_texture_path(const std::string &fbxPath,
   }
 
   return {};
+}
+
+static osg::Image* load_external_image(const std::filesystem::path& path) {
+    const auto utf8_path = path.u8string();
+    const std::string filename(utf8_path.begin(), utf8_path.end());
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (file) {
+        const auto size = file.tellg();
+        if (size > 0 && size <= std::numeric_limits<int>::max()) {
+            std::vector<unsigned char> bytes(static_cast<size_t>(size));
+            file.seekg(0);
+            if (file.read(reinterpret_cast<char*>(bytes.data()), size)) {
+                int width, height, channels;
+                unsigned char* data = stbi_load_from_memory(
+                    bytes.data(), static_cast<int>(bytes.size()),
+                    &width, &height, &channels, 0);
+                if (data) return createImageFromSTB(data, width, height, channels, filename);
+            }
+        }
+    }
+    return osgDB::readImageFile(filename);
+}
+
+static std::array<float, 3> material_emission(const ufbx_material* mat) {
+    const auto& color = mat->pbr.emission_color.has_value
+        ? mat->pbr.emission_color : mat->fbx.emission_color;
+    if (!color.has_value) return {0.0f, 0.0f, 0.0f};
+
+    const bool has_factor = mat->pbr.emission_factor.has_value || mat->fbx.emission_factor.has_value;
+    const float factor = mat->pbr.emission_factor.has_value
+        ? static_cast<float>(mat->pbr.emission_factor.value_real)
+        : mat->fbx.emission_factor.has_value
+            ? static_cast<float>(mat->fbx.emission_factor.value_real) : 1.0f;
+    if (factor <= 0.0f) return {0.0f, 0.0f, 0.0f};
+
+    const auto& rgb = color.value_vec3;
+    // Without an explicit factor, white is commonly an FBX placeholder.
+    if (!has_factor && fabs(rgb.x - 1.0) < 1e-6 &&
+        fabs(rgb.y - 1.0) < 1e-6 && fabs(rgb.z - 1.0) < 1e-6) {
+        return {0.0f, 0.0f, 0.0f};
+    }
+    return {
+        static_cast<float>(rgb.x) * factor,
+        static_cast<float>(rgb.y) * factor,
+        static_cast<float>(rgb.z) * factor,
+    };
 }
 
 // Helper to create StateSet (Member function implementation)
@@ -231,24 +281,8 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
     }
 
     // Emission
-    osg::Vec4 emission(0, 0, 0, 1);
-    if (mat->pbr.emission_color.has_value) {
-        // Ignore default white emission (1,1,1) as it's often a placeholder
-        float e_r = mat->pbr.emission_color.value_vec3.x;
-        float e_g = mat->pbr.emission_color.value_vec3.y;
-        float e_b = mat->pbr.emission_color.value_vec3.z;
-        if (fabs(e_r - 1.0f) > 1e-6 || fabs(e_g - 1.0f) > 1e-6 || fabs(e_b - 1.0f) > 1e-6) {
-            emission.set(e_r, e_g, e_b, 1.0f);
-        }
-    } else if (mat->fbx.emission_color.has_value) {
-        float e_r = mat->fbx.emission_color.value_vec3.x;
-        float e_g = mat->fbx.emission_color.value_vec3.y;
-        float e_b = mat->fbx.emission_color.value_vec3.z;
-        if ((fabs(e_r - 1.0f) > 1e-6 && fabs(e_g - 1.0f) > 1e-6) && fabs(e_b - 1.0f) > 1e-6) {
-            emission.set(e_r, e_g, e_b, 1.0f);
-            if (mat->fbx.emission_factor.has_value) emission *= mat->fbx.emission_factor.value_real;
-        }
-    }
+    const auto emission_rgb = material_emission(mat);
+    osg::Vec4 emission(emission_rgb[0], emission_rgb[1], emission_rgb[2], 1.0f);
     material->setEmission(osg::Material::FRONT_AND_BACK, emission);
 
     stateSet->setAttributeAndModes(material);
@@ -289,17 +323,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
         if (!image) {
             std::filesystem::path filename = resolve_texture_path(source_filename, tex, texture_roots);
             if (!filename.empty()) {
-                // Try STB first
-                int width, height, channels;
-                std::string pathStr = filename.string();
-                unsigned char* imgData = stbi_load(pathStr.c_str(), &width, &height, &channels, 0);
-
-                if (imgData) {
-                    image = createImageFromSTB(imgData, width, height, channels, pathStr);
-                } else {
-                    // Fallback to OSG if STB fails
-                    image = osgDB::readImageFile(pathStr);
-                }
+                image = load_external_image(filename);
             }
         }
 
@@ -333,14 +357,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
         if (!image) {
             std::filesystem::path filename = resolve_texture_path(source_filename, ntex, texture_roots);
             if (!filename.empty()) {
-                int width, height, channels;
-                std::string pathStr = filename.string();
-                unsigned char* imgData = stbi_load(pathStr.c_str(), &width, &height, &channels, 0);
-                if (imgData) {
-                    image = createImageFromSTB(imgData, width, height, channels, pathStr);
-                } else {
-                    image = osgDB::readImageFile(pathStr);
-                }
+                image = load_external_image(filename);
             }
         }
         if (!image) recordMissingTexture(ntex, "normal");
@@ -370,14 +387,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
         if (!image) {
             std::filesystem::path filename = resolve_texture_path(source_filename, etex, texture_roots);
             if (!filename.empty()) {
-                int width, height, channels;
-                std::string pathStr = filename.string();
-                unsigned char* imgData = stbi_load(pathStr.c_str(), &width, &height, &channels, 0);
-                if (imgData) {
-                    image = createImageFromSTB(imgData, width, height, channels, pathStr);
-                } else {
-                    image = osgDB::readImageFile(pathStr);
-                }
+                image = load_external_image(filename);
             }
         }
         if (!image) recordMissingTexture(etex, "emission");
@@ -406,14 +416,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
         if (!image) {
             std::filesystem::path filename = resolve_texture_path(source_filename, rtex, texture_roots);
             if (!filename.empty()) {
-                int width, height, channels;
-                std::string pathStr = filename.string();
-                unsigned char* imgData = stbi_load(pathStr.c_str(), &width, &height, &channels, 0);
-                if (imgData) {
-                    image = createImageFromSTB(imgData, width, height, channels, pathStr);
-                } else {
-                    image = osgDB::readImageFile(pathStr);
-                }
+                image = load_external_image(filename);
             }
         }
         if (!image) recordMissingTexture(rtex, "roughness");
@@ -442,14 +445,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
         if (!image) {
             std::filesystem::path filename = resolve_texture_path(source_filename, mtex, texture_roots);
             if (!filename.empty()) {
-                int width, height, channels;
-                std::string pathStr = filename.string();
-                unsigned char* imgData = stbi_load(pathStr.c_str(), &width, &height, &channels, 0);
-                if (imgData) {
-                    image = createImageFromSTB(imgData, width, height, channels, pathStr);
-                } else {
-                    image = osgDB::readImageFile(pathStr);
-                }
+                image = load_external_image(filename);
             }
         }
         if (!image) recordMissingTexture(mtex, "metalness");
@@ -478,14 +474,7 @@ osg::StateSet* FBXLoader::getOrCreateStateSet(const ufbx_material* mat) {
         if (!image) {
             std::filesystem::path filename = resolve_texture_path(source_filename, aotex, texture_roots);
             if (!filename.empty()) {
-                int width, height, channels;
-                std::string pathStr = filename.string();
-                unsigned char* imgData = stbi_load(pathStr.c_str(), &width, &height, &channels, 0);
-                if (imgData) {
-                    image = createImageFromSTB(imgData, width, height, channels, pathStr);
-                } else {
-                    image = osgDB::readImageFile(pathStr);
-                }
+                image = load_external_image(filename);
             }
         }
         if (!image) recordMissingTexture(aotex, "ambientOcclusion");
@@ -624,28 +613,8 @@ std::string FBXLoader::calcMaterialHash(const ufbx_material *mat) {
   float shininess = mat->fbx.specular_exponent.has_value ? (float)mat->fbx.specular_exponent.value_real : 0.0f;
   oss.write(reinterpret_cast<const char*>(&shininess), sizeof(shininess));
 
-  float emission[3] = {0.0f, 0.0f, 0.0f};
-  if (mat->pbr.emission_color.has_value) {
-    float e_r = (float)mat->pbr.emission_color.value_vec3.x;
-    float e_g = (float)mat->pbr.emission_color.value_vec3.y;
-    float e_b = (float)mat->pbr.emission_color.value_vec3.z;
-    if (fabs(e_r - 1.0f) > 1e-6 && fabs(e_g - 1.0f) > 1e-6 && fabs(e_b - 1.0f) > 1e-6) {
-        emission[0] = (float)mat->pbr.emission_color.value_vec3.x;
-        emission[1] = (float)mat->pbr.emission_color.value_vec3.y;
-        emission[2] = (float)mat->pbr.emission_color.value_vec3.z;
-    }
-  } else if (mat->fbx.emission_color.has_value) {
-    float e_r = (float)mat->fbx.emission_color.value_vec3.x;
-    float e_g = (float)mat->fbx.emission_color.value_vec3.y;
-    float e_b = (float)mat->fbx.emission_color.value_vec3.z;
-    float ef = mat->fbx.emission_factor.has_value ? (float)mat->fbx.emission_factor.value_real : 1.0f;
-    if (fabs(e_r - 1.0f) > 1e-6 && fabs(e_g - 1.0f) > 1e-6 && fabs(e_b - 1.0f) > 1e-6) {
-        emission[0] = (float)mat->fbx.emission_color.value_vec3.x * ef;
-        emission[1] = (float)mat->fbx.emission_color.value_vec3.y * ef;
-        emission[2] = (float)mat->fbx.emission_color.value_vec3.z * ef;
-    }
-  }
-  oss.write(reinterpret_cast<const char*>(emission), sizeof(emission));
+  const auto emission = material_emission(mat);
+  oss.write(reinterpret_cast<const char*>(emission.data()), emission.size() * sizeof(float));
 
   const ufbx_texture* tex = nullptr;
   if (mat->pbr.base_color.texture) tex = mat->pbr.base_color.texture;

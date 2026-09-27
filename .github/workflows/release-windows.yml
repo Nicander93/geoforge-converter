@@ -73,6 +73,11 @@ jobs:
         env:
           VCPKG_HAS_BEEN_INSTALLED: "1"
 
+      - name: Test FBX and OBJ texture coordinates
+        run: cargo test --release --test fbx_uv_orientation
+        env:
+          VCPKG_HAS_BEEN_INSTALLED: "1"
+
       - name: Package converter runtime
         shell: pwsh
         run: |
