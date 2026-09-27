@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <limits>
 #include <exception>
+#include <mutex>
 
 // Add Basis Universal includes for KTX2 compression
 #include <basisu/encoder/basisu_comp.h>
@@ -407,12 +408,10 @@ osg_tree get_all_tree(std::string& file_name, bool* read_error = nullptr) {
     osg_tree root_tile;
     vector<string> fileNames = { file_name };
 
-    // Log OSG plugin information on first call
-    static bool logged = false;
-    if (!logged) {
+    static std::once_flag log_flag;
+    std::call_once(log_flag, []() {
         log_osg_plugin_info();
-        logged = true;
-    }
+    });
 
     InfoVisitor infoVisitor(get_parent(file_name));
     {   // add block to release Node
@@ -1114,12 +1113,10 @@ bool osgb2glb_buf(std::string path, std::string& glb_buff, MeshInfo& mesh_info, 
     vector<string> fileNames = { path };
     std::string parent_path = get_parent(path);
 
-    // Log OSG plugin information on first call
-    static bool logged = false;
-    if (!logged) {
+    static std::once_flag log_flag;
+    std::call_once(log_flag, []() {
         log_osg_plugin_info();
-        logged = true;
-    }
+    });
 
     osg::ref_ptr<osg::Node> root = osgDB::readNodeFiles(fileNames);
     if (!root.valid()) {

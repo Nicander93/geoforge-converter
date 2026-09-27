@@ -241,9 +241,9 @@ fn main() {
         .init();
     //env_logger::init();
     let matches = Command::new("Make 3dtile program")
-        .version("1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("fanvanzh <fanvanzh@sina.com>")
-        .about("a very fast 3dtile tool")
+        .about("GeoForge converter: fast OSGB/model to 3D Tiles conversion")
         .arg(
             Arg::new("input")
                 .short('i')
@@ -299,6 +299,12 @@ fn main() {
             Arg::new("capabilities-json")
                 .long("capabilities-json")
                 .help("Print machine-readable converter capabilities and exit")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("show-env-help")
+                .long("show-env-help")
+                .help("Display environment variable documentation and exit")
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -382,12 +388,55 @@ fn main() {
             "{}",
             serde_json::json!({
                 "version": 1,
-                "formats": ["fbx", "obj"],
+                "converterVersion": env!("CARGO_PKG_VERSION"),
+                "converterName": "geoforge-converter",
+                "formats": ["osgb", "fbx", "obj"],
                 "modelConfigVersion": 1,
                 "georeferenceModes": ["local", "anchor", "projected"],
                 "projectedGeoreference": true,
+                "features": {
+                    "osgb": {
+                        "supported": true,
+                        "parallel": true,
+                        "threadControl": "GEOFORGE_CONVERT_THREADS",
+                        "defaultThreads": "available_parallelism/2, clamped 1-8"
+                    },
+                    "compression": {
+                        "draco": true,
+                        "ktx2": true,
+                        "meshopt": true
+                    },
+                    "extensions": {
+                        "KHR_draco_mesh_compression": true,
+                        "KHR_texture_basisu": true,
+                        "KHR_materials_unlit": true
+                    }
+                }
             })
         );
+        return;
+    }
+
+    if matches.get_flag("show-env-help") {
+        println!("GeoForge Converter Environment Variables:");
+        println!();
+        println!("GEOFORGE_CONVERT_THREADS");
+        println!("  Controls OSGB parallel conversion worker threads.");
+        println!("  Value: positive integer");
+        println!("  Default: available_parallelism/2, clamped to 1-8");
+        println!("  Example: GEOFORGE_CONVERT_THREADS=4");
+        println!();
+        println!("RUST_LOG");
+        println!("  Controls logging verbosity.");
+        println!("  Values: error, warn, info, debug, trace");
+        println!("  Default: info");
+        println!();
+        println!("OSG_LIBRARY_PATH");
+        println!("  OpenSceneGraph plugin search path (auto-detected).");
+        println!();
+        println!("GDAL_DATA, PROJ_DATA");
+        println!("  GDAL/PROJ data paths for coordinate transformations (auto-detected).");
+        println!();
         return;
     }
 
@@ -1045,6 +1094,12 @@ fn convert_osgb(
     use std::io::prelude::*;
     use std::time;
 
+    info!(
+        "GeoForge converter v{} starting OSGB conversion",
+        env!("CARGO_PKG_VERSION")
+    );
+    info!("Input: {}, Output: {}", src, dest);
+
     let dir = std::path::Path::new(src);
     let dir_dest = std::path::Path::new(dest);
 
@@ -1334,7 +1389,7 @@ fn convert_osgb(
     }
     let elap_sec = tick.elapsed().unwrap_or_default();
     let tick_num = elap_sec.as_secs() as f64 + elap_sec.subsec_nanos() as f64 * 1e-9;
-    info!("task over, cost {:.2} s.", tick_num);
+    info!("OSGB conversion completed successfully in {:.2}s", tick_num);
     unsafe {
         fun_c::cleanup_global_resources();
     }
