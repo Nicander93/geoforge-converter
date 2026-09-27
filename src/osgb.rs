@@ -523,8 +523,9 @@ fn coordinate_results(
     while let Ok(msg) = receiver.recv() {
         match msg {
             WorkerMessage::Success(result) => {
-                log::info!("Block {} completed successfully", result.id);
-                manifest.mark_succeeded(&result.id, result);
+                let block_id = result.id.clone();
+                log::info!("Block {} completed successfully", block_id);
+                manifest.mark_succeeded(&block_id, result);
                 completed += 1;
 
                 if let Err(e) = manifest.write_to_file(&manifest_path) {
