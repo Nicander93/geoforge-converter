@@ -4,12 +4,16 @@ extern crate serde;
 extern crate serde_json;
 
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
 use std::error::Error;
 use std::path::Path;
 
+use crate::block_job::{BlockJob, BlockResult};
+use crate::block_manifest::BlockManifest;
 use crate::common::str_to_vec_c;
 
 extern "C" {
@@ -72,17 +76,15 @@ extern "C" {
 
 }
 
-#[derive(Debug)]
-struct TileResult {
-    json: String,
-    path: String,
-    box_v: Vec<f64>,
+enum WorkerMessage {
+    Success(BlockResult),
+    Error { block_id: String, error: String },
 }
 
-struct OsgbInfo {
-    in_dir: String,
-    out_dir: String,
-    sender: ::std::sync::mpsc::Sender<Result<TileResult, String>>,
+struct OsgbWorkerContext {
+    job: BlockJob,
+    sender: ::std::sync::mpsc::SyncSender<WorkerMessage>,
+    cancel_flag: Arc<AtomicBool>,
 }
 
 fn convert_threads() -> usize {
@@ -114,75 +116,93 @@ pub fn osgb_batch_convert(
 ) -> Result<(), Box<dyn Error>> {
     use std::fs::File;
     use std::io::prelude::*;
-    use std::sync::mpsc::channel;
+    use std::sync::mpsc::sync_channel;
 
     let path = dir.join("Data");
     if !path.exists() || !path.is_dir() {
         return Err(From::from(format!("dir {} not exist", path.display())));
     }
 
-    let (sender, receiver) = channel();
-    let mut osgb_dir_pair: Vec<OsgbInfo> = vec![];
-    let mut task_count = 0;
     fs::create_dir_all(dir_dest)?;
+    let data_dir = dir_dest.join("Data");
+    fs::create_dir_all(&data_dir)?;
+
+    let mut jobs = vec![];
     for entry in fs::read_dir(&path)? {
         let entry = entry?;
         let path_tile = entry.path();
         if path_tile.is_dir() {
-            // if Tile_xx_xx.osgb
             let stem = path_tile
                 .file_stem()
                 .map(|value| value.to_string_lossy().into_owned())
                 .ok_or_else(|| format!("tile directory has no name: {}", path_tile.display()))?;
             let osgb = path_tile.join(&stem).with_extension("osgb");
             if osgb.exists() && !osgb.is_dir() {
-                // convert this path
-                task_count += 1;
-                //let in_buf = str_to_vec_c(osgb.to_str().unwrap());
-                let out_dir = dir_dest.join("Data").join(&stem);
-                fs::create_dir_all(&out_dir)?;
-                osgb_dir_pair.push(OsgbInfo {
-                    in_dir: osgb.to_string_lossy().into(),
-                    out_dir: out_dir.to_string_lossy().into(),
-                    sender: sender.clone(),
-                });
+                let out_dir = data_dir.join(&stem);
+                jobs.push(BlockJob::new(
+                    stem,
+                    osgb.to_path_buf(),
+                    out_dir,
+                ));
             } else {
                 error!("dir error: {}", osgb.display());
             }
         }
     }
 
-    let rad_x = unsafe { degree2rad(center_x) };
-    let rad_y = unsafe { degree2rad(center_y) };
+    if jobs.is_empty() {
+        return Err("no valid OSGB tiles found".into());
+    }
 
-    let max_lvl: i32 = max_lvl.unwrap_or(100);
+    jobs.sort_by(|a, b| a.id.cmp(&b.id));
+
     let thread_count = convert_threads();
+    let queue_capacity = (thread_count * 2).max(4);
+    
     log::info!(
-        "OSGB conversion config: threads={}, max_lvl={}, texture_compress={}, meshopt={}, draco={}, unlit={}",
+        "OSGB conversion config: blocks={}, threads={}, queue_capacity={}, max_lvl={}, texture_compress={}, meshopt={}, draco={}, unlit={}",
+        jobs.len(),
         thread_count,
-        max_lvl,
+        queue_capacity,
+        max_lvl.unwrap_or(100),
         enable_texture_compress,
         enable_meshopt,
         enable_draco_compress,
         enable_unlit
     );
+
+    let (sender, receiver) = sync_channel(queue_capacity);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    let rad_x = unsafe { degree2rad(center_x) };
+    let rad_y = unsafe { degree2rad(center_y) };
+    let max_lvl: i32 = max_lvl.unwrap_or(100);
+
+    let total_jobs = jobs.len();
+    let coordinator_cancel = cancel_flag.clone();
+    let coordinator_handle = std::thread::spawn(move || {
+        coordinate_results(receiver, total_jobs, coordinator_cancel)
+    });
+
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(thread_count)
         .build()?;
-    pool.install(|| {
-        osgb_dir_pair
-            .into_par_iter()
-            .map(|info| unsafe {
-                let mut root_box = vec![0f64; 6];
-                let mut json_buf = vec![];
-                let mut json_len = 0i32;
-                let in_ptr = str_to_vec_c(&info.in_dir);
-                let out_ptr = str_to_vec_c(&info.out_dir);
-                let out_ptr = osgb23dtile_path(
-                    in_ptr.as_ptr(),
-                    out_ptr.as_ptr(),
-                    root_box.as_mut_ptr(),
-                    (&mut json_len) as *mut i32,
+
+    let worker_result: Result<(), String> = pool.install(|| {
+        jobs.into_par_iter()
+            .map(|job| {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+
+                let ctx = OsgbWorkerContext {
+                    job: job.clone(),
+                    sender: sender.clone(),
+                    cancel_flag: cancel_flag.clone(),
+                };
+
+                process_block(
+                    ctx,
                     rad_x,
                     rad_y,
                     max_lvl,
@@ -190,89 +210,255 @@ pub fn osgb_batch_convert(
                     enable_meshopt,
                     enable_draco_compress,
                     enable_unlit,
-                );
-                let result = if out_ptr.is_null() {
-                    Err(format!(
-                        "converter returned no JSON for tile: {}",
-                        info.in_dir
-                    ))
-                } else if json_len < 0 {
-                    libc::free(out_ptr);
-                    Err(format!(
-                        "converter returned a negative JSON length for tile: {}",
-                        info.in_dir
-                    ))
-                } else if json_len as usize > 64 * 1024 * 1024 {
-                    libc::free(out_ptr);
-                    Err(format!(
-                        "converter returned an unreasonable JSON length for tile {}: {} bytes",
-                        info.in_dir, json_len
-                    ))
-                } else {
-                    json_buf.resize(json_len as usize, 0);
-                    libc::memcpy(
-                        json_buf.as_mut_ptr() as *mut libc::c_void,
-                        out_ptr,
-                        json_len as usize,
-                    );
-                    libc::free(out_ptr);
-                    match String::from_utf8(json_buf) {
-                        Ok(json) => Ok(TileResult {
-                            path: info.out_dir.clone(),
-                            json,
-                            box_v: root_box,
-                        }),
-                        Err(error) => Err(format!(
-                            "generated tile JSON is not valid UTF-8 for {}: {error}",
-                            info.in_dir
-                        )),
-                    }
-                };
-                info.sender
-                    .send(result)
-                    .map_err(|error| format!("failed to report tile result: {error}"))?;
-                Ok::<(), String>(())
+                )
             })
             .collect::<Result<Vec<_>, _>>()
+            .map(|_| ())
+    });
+
+    drop(sender);
+
+    let manifest = coordinator_handle
+        .join()
+        .map_err(|_| "coordinator thread panicked")??;
+
+    worker_result?;
+
+    if manifest.blocks().is_empty() {
+        return Err("no blocks were successfully converted".into());
+    }
+
+    build_root_tileset(
+        manifest,
+        dir_dest,
+        center_x,
+        center_y,
+        region_offset,
+        enu_offset,
+        origin_height,
+    )?;
+
+    Ok(())
+}
+
+fn process_block(
+    ctx: OsgbWorkerContext,
+    rad_x: f64,
+    rad_y: f64,
+    max_lvl: i32,
+    enable_texture_compress: bool,
+    enable_meshopt: bool,
+    enable_draco: bool,
+    enable_unlit: bool,
+) -> Result<(), String> {
+    use std::fs::File;
+    use std::io::Write;
+
+    if ctx.cancel_flag.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+
+    let staging_dir = ctx.job.staging_dir();
+    if staging_dir.exists() {
+        fs::remove_dir_all(&staging_dir)
+            .map_err(|e| format!("failed to clean staging for {}: {}", ctx.job.id, e))?;
+    }
+    fs::create_dir_all(&staging_dir)
+        .map_err(|e| format!("failed to create staging for {}: {}", ctx.job.id, e))?;
+
+    let mut root_box = vec![0f64; 6];
+    let mut json_buf = vec![];
+    let mut json_len = 0i32;
+
+    unsafe {
+        let in_ptr = str_to_vec_c(ctx.job.input_path.to_string_lossy().as_ref());
+        let out_ptr = str_to_vec_c(staging_dir.to_string_lossy().as_ref());
+        let result_ptr = osgb23dtile_path(
+            in_ptr.as_ptr(),
+            out_ptr.as_ptr(),
+            root_box.as_mut_ptr(),
+            (&mut json_len) as *mut i32,
+            rad_x,
+            rad_y,
+            max_lvl,
+            enable_texture_compress,
+            enable_meshopt,
+            enable_draco,
+            enable_unlit,
+        );
+
+        if result_ptr.is_null() {
+            let error = format!("converter returned null for block {}", ctx.job.id);
+            let _ = ctx.sender.send(WorkerMessage::Error {
+                block_id: ctx.job.id.clone(),
+                error,
+            });
+            return Ok(());
+        }
+
+        if json_len < 0 {
+            libc::free(result_ptr);
+            let error = format!("converter returned negative JSON length for block {}", ctx.job.id);
+            let _ = ctx.sender.send(WorkerMessage::Error {
+                block_id: ctx.job.id.clone(),
+                error,
+            });
+            return Ok(());
+        }
+
+        if json_len as usize > 64 * 1024 * 1024 {
+            libc::free(result_ptr);
+            let error = format!("converter returned excessive JSON length for block {}: {} bytes", ctx.job.id, json_len);
+            let _ = ctx.sender.send(WorkerMessage::Error {
+                block_id: ctx.job.id.clone(),
+                error,
+            });
+            return Ok(());
+        }
+
+        json_buf.resize(json_len as usize, 0);
+        libc::memcpy(
+            json_buf.as_mut_ptr() as *mut libc::c_void,
+            result_ptr,
+            json_len as usize,
+        );
+        libc::free(result_ptr);
+    }
+
+    let json_str = String::from_utf8(json_buf).map_err(|e| {
+        format!("block {} JSON is not valid UTF-8: {}", ctx.job.id, e)
     })?;
 
-    // merge and root
-    let mut tile_array = vec![];
-    for _ in 0..task_count {
-        match receiver.recv() {
-            Ok(Ok(t)) if !t.json.is_empty() => tile_array.push(t),
-            Ok(Ok(_)) => return Err("converter returned an empty tile JSON".into()),
-            Ok(Err(error)) => return Err(error.into()),
-            Err(error) => return Err(format!("tile result channel closed: {error}").into()),
+    if json_str.is_empty() {
+        let error = format!("converter returned empty JSON for block {}", ctx.job.id);
+        let _ = ctx.sender.send(WorkerMessage::Error {
+            block_id: ctx.job.id.clone(),
+            error,
+        });
+        return Ok(());
+    }
+
+    let json_val: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| format!("invalid JSON for block {}: {}", ctx.job.id, e))?;
+
+    let geometric_error = json_val["geometricError"].as_f64().unwrap_or(1000.0);
+
+    let tileset_json = json!({
+        "asset": {
+            "version": "1.0",
+            "gltfUpAxis": "Z"
+        },
+        "geometricError": geometric_error,
+        "root": json_val
+    });
+
+    let tileset_path = staging_dir.join("tileset.json");
+    let mut f = File::create(&tileset_path)
+        .map_err(|e| format!("failed to create tileset for {}: {}", ctx.job.id, e))?;
+    f.write_all(serde_json::to_string_pretty(&tileset_json)?.as_bytes())
+        .map_err(|e| format!("failed to write tileset for {}: {}", ctx.job.id, e))?;
+    f.sync_all()
+        .map_err(|e| format!("failed to sync tileset for {}: {}", ctx.job.id, e))?;
+    drop(f);
+
+    let done_dir = ctx.job.done_dir();
+    if done_dir.exists() {
+        fs::remove_dir_all(&done_dir)
+            .map_err(|e| format!("failed to remove old output for {}: {}", ctx.job.id, e))?;
+    }
+
+    fs::rename(&staging_dir, &done_dir)
+        .map_err(|e| format!("failed to commit block {}: {}", ctx.job.id, e))?;
+
+    let result = BlockResult::new(
+        ctx.job.id.clone(),
+        done_dir,
+        [
+            root_box[0], root_box[1], root_box[2],
+            root_box[3], root_box[4], root_box[5],
+        ],
+        geometric_error,
+    );
+
+    if ctx.sender.send(WorkerMessage::Success(result)).is_err() {
+        log::warn!("coordinator dropped, block {} completed but not recorded", ctx.job.id);
+    }
+
+    Ok(())
+}
+
+fn coordinate_results(
+    receiver: std::sync::mpsc::Receiver<WorkerMessage>,
+    total_jobs: usize,
+    cancel_flag: Arc<AtomicBool>,
+) -> Result<BlockManifest, String> {
+    let mut manifest = BlockManifest::new();
+    let mut completed = 0;
+    let mut failed = Vec::new();
+
+    while let Ok(msg) = receiver.recv() {
+        match msg {
+            WorkerMessage::Success(result) => {
+                log::info!("Block {} completed successfully", result.id);
+                manifest.add_block(result);
+                completed += 1;
+            }
+            WorkerMessage::Error { block_id, error } => {
+                log::error!("Block {} failed: {}", block_id, error);
+                failed.push((block_id, error));
+            }
+        }
+
+        if completed + failed.len() >= total_jobs {
+            break;
         }
     }
-    if tile_array.is_empty() {
-        return Err("converter produced no valid tiles".into());
+
+    if !failed.is_empty() {
+        cancel_flag.store(true, Ordering::Relaxed);
+        return Err(format!(
+            "conversion failed: {}/{} blocks failed. First error: {}",
+            failed.len(),
+            total_jobs,
+            failed[0].1
+        ));
     }
+
+    manifest.sort_by_id();
+    Ok(manifest)
+}
+
+fn build_root_tileset(
+    manifest: BlockManifest,
+    dir_dest: &Path,
+    center_x: f64,
+    center_y: f64,
+    region_offset: Option<f64>,
+    enu_offset: Option<(f64, f64, f64)>,
+    origin_height: Option<f64>,
+) -> Result<(), Box<dyn Error>> {
+    use std::fs::File;
+    use std::io::Write;
+
     let mut root_box = vec![-1.0E+38f64, -1.0E+38, -1.0E+38, 1.0E+38, 1.0E+38, 1.0E+38];
     let mut root_geometric_error = 0.0;
-    for x in tile_array.iter() {
+
+    for block in manifest.blocks() {
         for i in 0..3 {
-            if x.box_v[i] > root_box[i] {
-                root_box[i] = x.box_v[i]
+            if block.bounding_box[i] > root_box[i] {
+                root_box[i] = block.bounding_box[i];
             }
         }
         for i in 3..6 {
-            if x.box_v[i] < root_box[i] {
-                root_box[i] = x.box_v[i]
+            if block.bounding_box[i] < root_box[i] {
+                root_box[i] = block.bounding_box[i];
             }
         }
-        let json_val: serde_json::Value = serde_json::from_str(&x.json)
-            .map_err(|error| format!("invalid tile JSON for {}: {error}", x.path))?;
-        if let Some(ge) = json_val["geometricError"].as_f64() {
-            if ge > root_geometric_error {
-                root_geometric_error = ge;
-            }
+        if block.geometric_error > root_geometric_error {
+            root_geometric_error = block.geometric_error;
         }
     }
 
-    //let root_geometric_error = get_geometric_error(center_y, 10);
-    // Use origin height: priority: origin_height > enu_offset.2 > region_offset calculation
     let tras_height = if let Some(h) = origin_height {
         h
     } else if let Some((_, _, enu_z)) = enu_offset {
@@ -282,10 +468,10 @@ pub fn osgb_batch_convert(
     } else {
         0f64
     };
+
     let mut trans_vec = vec![0f64; 16];
     unsafe {
         if let Some((enu_x, enu_y, enu_z)) = enu_offset {
-            // Use the ENU-aware transform function
             transform_c_with_enu_offset(
                 center_x,
                 center_y,
@@ -296,90 +482,81 @@ pub fn osgb_batch_convert(
                 trans_vec.as_mut_ptr(),
             );
         } else {
-            // Use standard transform function
             transform_c(center_x, center_y, tras_height, trans_vec.as_mut_ptr());
         }
     }
-    let mut root_json = json!(
-        {
-            "asset": {
-                "version": "1.0",
-                "gltfUpAxis": "Z"
+
+    let mut root_json = json!({
+        "asset": {
+            "version": "1.0",
+            "gltfUpAxis": "Z"
+        },
+        "geometricError": root_geometric_error * 2.0,
+        "root": {
+            "transform": trans_vec,
+            "boundingVolume": {
+                "box": box_to_tileset_box(&root_box)
             },
             "geometricError": root_geometric_error * 2.0,
-            "root" : {
-                "transform" : trans_vec,
-                "boundingVolume" : {
-                    "box": box_to_tileset_box(&root_box)
-                },
-                "geometricError": root_geometric_error * 2.0,
-                "refine": "REPLACE",
-                "children": []
-            }
+            "refine": "REPLACE",
+            "children": []
         }
-    );
+    });
 
-    for x in tile_array {
-        let path = x.path.clone();
-        let relative_path = Path::new(&path)
+    for block in manifest.blocks() {
+        let relative_path = block.output_path
             .strip_prefix(dir_dest)
-            .map_err(|error| {
-                format!(
-                    "tile output path is outside the converter output root: {} ({error})",
-                    x.path
-                )
-            })?;
+            .map_err(|e| format!("block path outside output root: {}", e))?;
         let relative_uri = relative_path
             .to_string_lossy()
             .replace('\\', "/")
             .trim_start_matches('/')
             .to_string();
+
         if relative_uri.is_empty() {
-            return Err(format!("tile output path is empty: {}", x.path).into());
+            return Err(format!("empty relative URI for block {}", block.id).into());
         }
-        let tile_uri = format!("./{relative_uri}/tileset.json");
-        let json_val: serde_json::Value = serde_json::from_str(&x.json)
-            .map_err(|error| format!("invalid tile JSON for {}: {error}", x.path))?;
-        let tile_box = json_val
-            .get("boundingVolume")
-            .and_then(|value| value.get("box"))
-            .and_then(|value| value.as_array())
-            .filter(|value| value.len() == 12)
-            .ok_or_else(|| format!("tile JSON has no valid bounding box: {}", x.path))?;
-        let tile_geometric_error = json_val["geometricError"].as_f64().unwrap_or(1000.0);
-        let tile_object = json!(
-            {
-                "boundingVolume": {
-                    "box": &tile_box
-                },
-                "geometricError": tile_geometric_error,
-                "content": {
-                    "uri": tile_uri
-                }
+
+        let tile_uri = format!("./{}/tileset.json", relative_uri);
+        
+        let tileset_path = block.output_path.join("tileset.json");
+        let tileset_content = fs::read_to_string(&tileset_path)
+            .map_err(|e| format!("failed to read tileset for block {}: {}", block.id, e))?;
+        let tileset_json: serde_json::Value = serde_json::from_str(&tileset_content)
+            .map_err(|e| format!("invalid tileset JSON for block {}: {}", block.id, e))?;
+
+        let tile_box = tileset_json["root"]["boundingVolume"]["box"]
+            .as_array()
+            .filter(|arr| arr.len() == 12)
+            .ok_or_else(|| format!("block {} tileset has no valid bounding box", block.id))?;
+
+        let tile_object = json!({
+            "boundingVolume": {
+                "box": tile_box
+            },
+            "geometricError": block.geometric_error,
+            "content": {
+                "uri": tile_uri
             }
-        );
+        });
+
         root_json["root"]["children"]
             .as_array_mut()
-            .ok_or_else(|| "root tileset children is not an array".to_string())?
+            .ok_or("root children is not an array")?
             .push(tile_object);
-        let sub_tile = json!({
-            "asset": {
-                "version": "1.0",
-                "gltfUpAxis":"Z"
-            },
-            "geometricError": tile_geometric_error,
-            "root": json_val
-        }
-        );
-        let out_file = path.clone() + "/tileset.json";
-        let mut f = File::create(out_file)?;
-        f.write_all(serde_json::to_string_pretty(&sub_tile)?.as_bytes())?;
     }
-    let path_json = dir_dest.join("tileset.json");
-    let mut f = File::create(path_json)?;
+
+    let manifest_path = dir_dest.join("block_manifest.json");
+    manifest.write_to_file(&manifest_path)?;
+
+    let root_path = dir_dest.join("tileset.json");
+    let mut f = File::create(root_path)?;
     f.write_all(serde_json::to_string_pretty(&root_json)?.as_bytes())?;
+    f.sync_all()?;
+
     Ok(())
 }
+
 
 #[allow(dead_code)]
 fn get_geometric_error(center_y: f64, lvl: i32) -> f64 {
