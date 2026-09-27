@@ -1,10 +1,20 @@
 use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct BlockJob {
     pub id: String,
     pub input_path: PathBuf,
     pub output_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
 }
 
 #[derive(Debug, Clone)]

@@ -14,6 +14,7 @@ mod block_job;
 mod block_manifest;
 mod common;
 mod fbx;
+mod fingerprint;
 pub mod fun_c;
 mod osgb;
 mod shape;
@@ -353,6 +354,18 @@ fn main() {
                 .action(ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("resume")
+                .long("resume")
+                .help("Resume from existing output directory, reusing succeeded blocks")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("no-resume")
+                .long("no-resume")
+                .help("Do not resume, start fresh (default)")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
            Arg::new("lon")
             .long("lon")
             .help("Set the longitude")
@@ -507,6 +520,7 @@ fn main() {
     let enable_texture_compress = matches.get_flag("enable-texture-compress");
     let enable_lod = matches.get_flag("enable-lod");
     let enable_unlit = matches.get_flag("enable-unlit");
+    let enable_resume = matches.get_flag("resume");
 
     if matches.get_flag("verbose") {
         info!("set program versose on");
@@ -574,6 +588,7 @@ fn main() {
                 enable_texture_compress,
                 enable_draco,
                 enable_unlit,
+                enable_resume,
             ) {
                 std::process::exit(1);
             }
@@ -1090,6 +1105,7 @@ fn convert_osgb(
     enable_texture_compress: bool,
     enable_draco: bool,
     enable_unlit: bool,
+    enable_resume: bool,
 ) -> bool {
     use serde_json::Value;
     use std::fs::File;
@@ -1382,6 +1398,7 @@ fn convert_osgb(
         enable_simplify,
         enable_draco,
         enable_unlit,
+        enable_resume,
     ) {
         error!("{}", e);
         unsafe {
