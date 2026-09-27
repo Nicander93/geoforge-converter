@@ -13,8 +13,9 @@ use std::error::Error;
 use std::path::Path;
 
 use crate::block_job::{BlockJob, BlockResult};
-use crate::block_manifest::BlockManifest;
+use crate::block_manifest::{BlockEntry, BlockManifest};
 use crate::common::str_to_vec_c;
+use crate::fingerprint;
 
 extern "C" {
 
@@ -113,6 +114,7 @@ pub fn osgb_batch_convert(
     enable_meshopt: bool,
     enable_draco_compress: bool,
     enable_unlit: bool,
+    enable_resume: bool,
 ) -> Result<(), Box<dyn Error>> {
     use std::fs::File;
     use std::io::prelude::*;
@@ -156,19 +158,134 @@ pub fn osgb_batch_convert(
 
     jobs.sort_by(|a, b| a.id.cmp(&b.id));
 
+    let converter_version = env!("CARGO_PKG_VERSION").to_string();
+    let params_hash = fingerprint::compute_params_hash(
+        max_lvl,
+        enable_texture_compress,
+        enable_meshopt,
+        enable_draco_compress,
+        enable_unlit,
+    );
+
+    let manifest_path = dir_dest.join("block_manifest.json");
+    let mut manifest = if enable_resume && manifest_path.exists() {
+        match BlockManifest::load_from_file(&manifest_path) {
+            Ok(m) => {
+                if m.converter_version() != converter_version {
+                    log::warn!(
+                        "Manifest converter version mismatch: {} vs {}. Starting fresh.",
+                        m.converter_version(),
+                        converter_version
+                    );
+                    BlockManifest::new(converter_version.clone(), params_hash.clone())
+                } else if m.params_hash() != params_hash {
+                    log::warn!(
+                        "Manifest params hash mismatch: {} vs {}. Starting fresh.",
+                        m.params_hash(),
+                        params_hash
+                    );
+                    BlockManifest::new(converter_version.clone(), params_hash.clone())
+                } else {
+                    log::info!(
+                        "Resuming from existing manifest: {} blocks",
+                        m.pending_or_failed_blocks().len()
+                    );
+                    m
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to load manifest, starting fresh: {}", e);
+                BlockManifest::new(converter_version.clone(), params_hash.clone())
+            }
+        }
+    } else {
+        BlockManifest::new(converter_version, params_hash)
+    };
+
+    let mut jobs_to_process = Vec::new();
+    let mut reused_count = 0;
+
+    for job in jobs {
+        let fingerprint = match fingerprint::compute_block_fingerprint(&job.input_path) {
+            Ok(fp) => fp,
+            Err(e) => {
+                log::warn!(
+                    "Failed to compute fingerprint for {}: {}. Will process.",
+                    job.id,
+                    e
+                );
+                String::new()
+            }
+        };
+
+        match manifest.get_entry(&job.id) {
+            Some(entry) if entry.status == crate::block_job::BlockStatus::Succeeded => {
+                if entry.fingerprint == fingerprint
+                    && fingerprint::validate_block_output(&job.output_dir)
+                {
+                    log::info!("Reusing succeeded block: {}", job.id);
+                    reused_count += 1;
+                    continue;
+                }
+                log::info!(
+                    "Block {} changed or invalid output, will reprocess",
+                    job.id
+                );
+            }
+            Some(entry) if entry.status == crate::block_job::BlockStatus::Running => {
+                if entry.fingerprint == fingerprint
+                    && fingerprint::validate_block_output(&job.output_dir)
+                {
+                    log::info!("Reclaiming completed block after crash: {}", job.id);
+                    if let Some(result) = entry.result.clone() {
+                        manifest.mark_succeeded(&job.id, result);
+                        reused_count += 1;
+                        continue;
+                    }
+                }
+                log::info!("Block {} was running, will retry", job.id);
+            }
+            _ => {}
+        }
+
+        manifest.add_pending_block(job.id.clone(), fingerprint);
+        jobs_to_process.push(job);
+    }
+
+    if reused_count > 0 {
+        log::info!("Reused {} succeeded blocks", reused_count);
+    }
+
+    if jobs_to_process.is_empty() {
+        log::info!("All blocks already completed, building root tileset");
+        build_root_tileset(
+            manifest,
+            dir_dest,
+            center_x,
+            center_y,
+            region_offset,
+            enu_offset,
+            origin_height,
+        )?;
+        return Ok(());
+    }
+
     let thread_count = convert_threads();
     let queue_capacity = (thread_count * 2).max(4);
     
     log::info!(
-        "OSGB conversion config: blocks={}, threads={}, queue_capacity={}, max_lvl={}, texture_compress={}, meshopt={}, draco={}, unlit={}",
-        jobs.len(),
+        "OSGB conversion config: blocks={}, reused={}, to_process={}, threads={}, queue_capacity={}, max_lvl={}, texture_compress={}, meshopt={}, draco={}, unlit={}, resume={}",
+        jobs_to_process.len() + reused_count,
+        reused_count,
+        jobs_to_process.len(),
         thread_count,
         queue_capacity,
         max_lvl.unwrap_or(100),
         enable_texture_compress,
         enable_meshopt,
         enable_draco_compress,
-        enable_unlit
+        enable_unlit,
+        enable_resume
     );
 
     let (sender, receiver) = sync_channel(queue_capacity);
@@ -178,10 +295,11 @@ pub fn osgb_batch_convert(
     let rad_y = unsafe { degree2rad(center_y) };
     let max_lvl: i32 = max_lvl.unwrap_or(100);
 
-    let total_jobs = jobs.len();
+    let total_jobs = jobs_to_process.len();
     let coordinator_cancel = cancel_flag.clone();
+    let manifest_path_clone = manifest_path.clone();
     let coordinator_handle = std::thread::spawn(move || {
-        coordinate_results(receiver, total_jobs, coordinator_cancel)
+        coordinate_results(receiver, total_jobs, coordinator_cancel, manifest, manifest_path_clone)
     });
 
     let pool = rayon::ThreadPoolBuilder::new()
@@ -189,7 +307,7 @@ pub fn osgb_batch_convert(
         .build()?;
 
     let worker_result: Result<(), String> = pool.install(|| {
-        jobs.into_par_iter()
+        jobs_to_process.into_par_iter()
             .map(|job| {
                 if cancel_flag.load(Ordering::Relaxed) {
                     return Ok(());
@@ -391,8 +509,9 @@ fn coordinate_results(
     receiver: std::sync::mpsc::Receiver<WorkerMessage>,
     total_jobs: usize,
     cancel_flag: Arc<AtomicBool>,
+    mut manifest: BlockManifest,
+    manifest_path: PathBuf,
 ) -> Result<BlockManifest, String> {
-    let mut manifest = BlockManifest::new();
     let mut completed = 0;
     let mut failed = Vec::new();
 
@@ -400,12 +519,21 @@ fn coordinate_results(
         match msg {
             WorkerMessage::Success(result) => {
                 log::info!("Block {} completed successfully", result.id);
-                manifest.add_block(result);
+                manifest.mark_succeeded(&result.id, result);
                 completed += 1;
+
+                if let Err(e) = manifest.write_to_file(&manifest_path) {
+                    log::warn!("Failed to write manifest after block completion: {}", e);
+                }
             }
             WorkerMessage::Error { block_id, error } => {
                 log::error!("Block {} failed: {}", block_id, error);
+                manifest.mark_failed(&block_id, error.clone());
                 failed.push((block_id, error));
+
+                if let Err(e) = manifest.write_to_file(&manifest_path) {
+                    log::warn!("Failed to write manifest after block failure: {}", e);
+                }
             }
         }
 
@@ -416,6 +544,9 @@ fn coordinate_results(
 
     if !failed.is_empty() {
         cancel_flag.store(true, Ordering::Relaxed);
+        if let Err(e) = manifest.write_to_file(&manifest_path) {
+            log::warn!("Failed to write final manifest: {}", e);
+        }
         return Err(format!(
             "conversion failed: {}/{} blocks failed. First error: {}",
             failed.len(),
@@ -424,7 +555,10 @@ fn coordinate_results(
         ));
     }
 
-    manifest.sort_by_id();
+    if let Err(e) = manifest.write_to_file(&manifest_path) {
+        log::warn!("Failed to write final manifest: {}", e);
+    }
+
     Ok(manifest)
 }
 
@@ -443,7 +577,12 @@ fn build_root_tileset(
     let mut root_box = vec![-1.0E+38f64, -1.0E+38, -1.0E+38, 1.0E+38, 1.0E+38, 1.0E+38];
     let mut root_geometric_error = 0.0;
 
-    for block in manifest.blocks() {
+    let succeeded_blocks = manifest.succeeded_blocks();
+    if succeeded_blocks.is_empty() {
+        return Err("no succeeded blocks to build root tileset".into());
+    }
+
+    for block in succeeded_blocks.iter() {
         for i in 0..3 {
             if block.bounding_box[i] > root_box[i] {
                 root_box[i] = block.bounding_box[i];
@@ -503,7 +642,10 @@ fn build_root_tileset(
         }
     });
 
-    for block in manifest.blocks() {
+    let mut sorted_blocks = succeeded_blocks.clone();
+    sorted_blocks.sort_by(|a, b| a.id.cmp(&b.id));
+
+    for block in sorted_blocks {
         let relative_path = block.output_path
             .strip_prefix(dir_dest)
             .map_err(|e| format!("block path outside output root: {}", e))?;
