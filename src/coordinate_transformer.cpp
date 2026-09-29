@@ -4,17 +4,17 @@
 
 namespace coords {
 
-// WGS84椭球参数
-// 长半轴和扁率用于ECEF坐标计算
-static constexpr double WGS84_A = 6378137.0;                    // 长半轴(米)
-static constexpr double WGS84_F = 1.0 / 298.257223563;          // 扁率
-static constexpr double WGS84_E2 = WGS84_F * (2.0 - WGS84_F);   // 第一偏心率的平方
+// WGS84妞悆鍙傛暟
+// 闀垮崐杞村拰鎵佺巼鐢ㄤ簬ECEF鍧愭爣璁＄畻
+static constexpr double WGS84_A = 6378137.0;                    // 闀垮崐杞?绫?
+static constexpr double WGS84_F = 1.0 / 298.257223563;          // 鎵佺巼
+static constexpr double WGS84_E2 = WGS84_F * (2.0 - WGS84_F);   // 绗竴鍋忓績鐜囩殑骞虫柟
 
 CoordinateTransformer::CoordinateTransformer(const CoordinateSystem& cs)
     : source_cs_(cs)
     , mode_(TransformMode::None) {
-    // 无地理参考模式，仅支持轴方向转换
-    // 适用于OSGB→GLTF等纯格式转换场景
+    // 鏃犲湴鐞嗗弬鑰冩ā寮忥紝浠呮敮鎸佽酱鏂瑰悜杞崲
+    // 閫傜敤浜嶰SGB鈫扜LTF绛夌函鏍煎紡杞崲鍦烘櫙
 }
 
 CoordinateTransformer::CoordinateTransformer(const CoordinateSystem& cs,
@@ -22,7 +22,7 @@ CoordinateTransformer::CoordinateTransformer(const CoordinateSystem& cs,
     : source_cs_(cs)
     , mode_(TransformMode::WithGeoReference)
     , geoid_config_(GeoidConfig::Disabled()) {
-    // 带地理参考模式，不支持Geoid校正
+    // 甯﹀湴鐞嗗弬鑰冩ā寮忥紝涓嶆敮鎸丟eoid鏍℃
     InitializeWithGeoRef(geo_ref);
 }
 
@@ -32,8 +32,8 @@ CoordinateTransformer::CoordinateTransformer(const CoordinateSystem& cs,
     : source_cs_(cs)
     , mode_(TransformMode::WithGeoReference)
     , geoid_config_(geoid_config) {
-    // 带地理参考和Geoid配置模式
-    // 适用于需要高程基准校正的场景
+    // 甯﹀湴鐞嗗弬鑰冨拰Geoid閰嶇疆妯″紡
+    // 閫傜敤浜庨渶瑕侀珮绋嬪熀鍑嗘牎姝ｇ殑鍦烘櫙
     InitializeWithGeoRef(geo_ref);
 }
 
@@ -69,9 +69,9 @@ CoordinateTransformer& CoordinateTransformer::operator=(CoordinateTransformer&& 
 }
 
 void CoordinateTransformer::InitializeWithGeoRef(const GeoReference& geo_ref) {
-    // 根据坐标系类型初始化
+    // 鏍规嵁鍧愭爣绯荤被鍨嬪垵濮嬪寲
     if (source_cs_.Type() == CoordinateType::ENU) {
-        // ENU类型：使用内置地理参考
+        // ENU绫诲瀷锛氫娇鐢ㄥ唴缃湴鐞嗗弬鑰?
         auto enu_params = source_cs_.GetENUParams();
         if (enu_params) {
             geo_origin_lon_ = enu_params->origin_lon;
@@ -79,7 +79,7 @@ void CoordinateTransformer::InitializeWithGeoRef(const GeoReference& geo_ref) {
             geo_origin_height_ = enu_params->origin_height;
         }
     } else if (source_cs_.NeedsOGRTransform()) {
-        // EPSG/WKT类型：创建OGR转换器用于后续坐标转换
+        // EPSG/WKT绫诲瀷锛氬垱寤篛GR杞崲鍣ㄧ敤浜庡悗缁潗鏍囪浆鎹?
         CreateOGRTransform();
 
         // A zero longitude/latitude anchor is valid. Presence is a separate
@@ -89,17 +89,20 @@ void CoordinateTransformer::InitializeWithGeoRef(const GeoReference& geo_ref) {
             geo_origin_lat_ = geo_ref.lat;
             geo_origin_height_ = geo_ref.height;
 
-            // 如果Geoid配置启用但高度未校正，应用校正
+            // 濡傛灉Geoid閰嶇疆鍚敤浣嗛珮搴︽湭鏍℃锛屽簲鐢ㄦ牎姝?
             if (geoid_config_.enabled && GeoidHeight::GetGlobalGeoidCalculator().IsInitialized()) {
                 geo_origin_height_ = ApplyGeoidCorrection(geo_origin_lat_, geo_origin_lon_, geo_origin_height_);
             }
         } else {
-            // 自己计算原点
+            // 鑷繁璁＄畻鍘熺偣
             auto [origin_x, origin_y, origin_z] = source_cs_.GetSourceOrigin();
             glm::dvec3 origin{origin_x, origin_y, origin_z};
 
             if (ogr_transform_) {
-                ogr_transform_->Transform(1, &origin.x, &origin.y, &origin.z);
+                {
+                    std::lock_guard<std::mutex> lock(ogr_mutex_);
+                    ogr_transform_->Transform(1, &origin.x, &origin.y, &origin.z);
+                }
             }
 
             geo_origin_lon_ = origin.x;
@@ -112,17 +115,17 @@ void CoordinateTransformer::InitializeWithGeoRef(const GeoReference& geo_ref) {
         fprintf(stderr, "[CoordinateTransformer] OGR transform result: lon=%.10f lat=%.10f h=%.3f\n",
                 geo_origin_lon_, geo_origin_lat_, geo_origin_height_);
     } else {
-        // LocalCartesian类型：使用用户提供的地理参考
+        // LocalCartesian绫诲瀷锛氫娇鐢ㄧ敤鎴锋彁渚涚殑鍦扮悊鍙傝€?
         geo_origin_lon_ = geo_ref.lon;
         geo_origin_lat_ = geo_ref.lat;
         geo_origin_height_ = geo_ref.height;
     }
 
-    // 计算ENU<->ECEF转换矩阵
+    // 璁＄畻ENU<->ECEF杞崲鐭╅樀
     enu_to_ecef_ = CalcEnuToEcefMatrix(geo_origin_lon_, geo_origin_lat_, geo_origin_height_);
     ecef_to_enu_ = glm::inverse(enu_to_ecef_);
 
-    // 计算轴方向转换矩阵
+    // 璁＄畻杞存柟鍚戣浆鎹㈢煩闃?
     axis_transform_ = GetAxisTransformMatrix(source_cs_.GetUpAxis(), UpAxis::Y_UP);
 
     fprintf(stderr, "[CoordinateTransformer] Initialized: geo_origin=(%.10f, %.10f, %.3f)\n",
@@ -130,30 +133,30 @@ void CoordinateTransformer::InitializeWithGeoRef(const GeoReference& geo_ref) {
 }
 
 void CoordinateTransformer::CreateOGRTransform() {
-    // 创建目标坐标系(WGS84)
+    // 鍒涘缓鐩爣鍧愭爣绯?WGS84)
     OGRSpatialReference outRs;
     outRs.importFromEPSG(4326);
     outRs.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
 
-    // 创建源坐标系
+    // 鍒涘缓婧愬潗鏍囩郴
     OGRSpatialReference inRs;
     inRs.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
 
     if (source_cs_.Type() == CoordinateType::EPSG) {
-        // 从EPSG编码创建
+        // 浠嶦PSG缂栫爜鍒涘缓
         auto code = source_cs_.GetEPSGCode();
         if (code) {
             inRs.importFromEPSG(*code);
         }
     } else if (source_cs_.Type() == CoordinateType::WKT) {
-        // 从WKT字符串创建
+        // 浠嶹KT瀛楃涓插垱寤?
         auto wkt = source_cs_.GetWKTString();
         if (wkt) {
             inRs.importFromWkt(wkt->c_str());
         }
     }
 
-    // 创建坐标转换器
+    // 鍒涘缓鍧愭爣杞崲鍣?
     OGRCoordinateTransformation* poCT = OGRCreateCoordinateTransformation(&inRs, &outRs);
     if (poCT) {
         ogr_transform_.reset(poCT);
@@ -164,26 +167,26 @@ void CoordinateTransformer::CreateOGRTransform() {
 }
 
 bool CoordinateTransformer::ShouldApplyGeoidCorrection() const {
-    // 1. Geoid配置必须启用
+    // 1. Geoid閰嶇疆蹇呴』鍚敤
     if (!geoid_config_.enabled) return false;
 
-    // 2. Geoid计算器必须已初始化
+    // 2. Geoid璁＄畻鍣ㄥ繀椤诲凡鍒濆鍖?
     if (!GeoidHeight::GetGlobalGeoidCalculator().IsInitialized()) return false;
 
-    // 3. 根据坐标系类型和垂直基准判断
+    // 3. 鏍规嵁鍧愭爣绯荤被鍨嬪拰鍨傜洿鍩哄噯鍒ゆ柇
     switch (source_cs_.Type()) {
         case CoordinateType::EPSG:
         case CoordinateType::WKT: {
-            // EPSG/WKT坐标系：检查垂直基准
+            // EPSG/WKT鍧愭爣绯伙細妫€鏌ュ瀭鐩村熀鍑?
             auto datum = source_cs_.GetVerticalDatum();
-            // 正高或未知时需要校正
+            // 姝ｉ珮鎴栨湭鐭ユ椂闇€瑕佹牎姝?
             return datum == VerticalDatum::Orthometric || datum == VerticalDatum::Unknown;
         }
         case CoordinateType::ENU:
-            // ENU坐标系：假设为WGS84椭球高，不需要校正
+            // ENU鍧愭爣绯伙細鍋囪涓篧GS84妞悆楂橈紝涓嶉渶瑕佹牎姝?
             return false;
         case CoordinateType::LocalCartesian:
-            // 本地笛卡尔：用户指定的高度假设为椭球高
+            // 鏈湴绗涘崱灏旓細鐢ㄦ埛鎸囧畾鐨勯珮搴﹀亣璁句负妞悆楂?
             return false;
         default:
             return false;
@@ -193,7 +196,7 @@ bool CoordinateTransformer::ShouldApplyGeoidCorrection() const {
 double CoordinateTransformer::ApplyGeoidCorrection(double lat, double lon, double height) const {
     if (!ShouldApplyGeoidCorrection()) return height;
 
-    // 正高 → 椭球高
+    // 姝ｉ珮 鈫?妞悆楂?
     double corrected = GeoidHeight::GetGlobalGeoidCalculator()
         .ConvertOrthometricToEllipsoidal(lat, lon, height);
 
@@ -211,34 +214,37 @@ glm::dvec3 CoordinateTransformer::ToWGS84(const glm::dvec3& point) const {
 
     glm::dvec3 result = point;
 
-    // 应用轴方向转换
+    // 搴旂敤杞存柟鍚戣浆鎹?
     result = axis_transform_ * glm::dvec4(result, 1.0);
 
-    // 根据坐标系类型处理
+    // 鏍规嵁鍧愭爣绯荤被鍨嬪鐞?
     if (source_cs_.Type() == CoordinateType::ENU) {
-        // ENU: 加上偏移量后转换到ECEF，再转换到WGS84
+        // ENU: 鍔犱笂鍋忕Щ閲忓悗杞崲鍒癊CEF锛屽啀杞崲鍒癢GS84
         auto enu_params = source_cs_.GetENUParams();
         if (enu_params) {
             result.x += enu_params->offset_x;
             result.y += enu_params->offset_y;
             result.z += enu_params->offset_z;
         }
-        // ENU坐标已经是相对于原点的，直接通过矩阵转换
+        // ENU鍧愭爣宸茬粡鏄浉瀵逛簬鍘熺偣鐨勶紝鐩存帴閫氳繃鐭╅樀杞崲
         glm::dvec3 ecef = enu_to_ecef_ * glm::dvec4(result, 1.0);
-        // ECEF → WGS84 (简化处理，实际应使用迭代算法)
-        // 这里返回地理原点作为近似
+        // ECEF 鈫?WGS84 (绠€鍖栧鐞嗭紝瀹為檯搴斾娇鐢ㄨ凯浠ｇ畻娉?
+        // 杩欓噷杩斿洖鍦扮悊鍘熺偣浣滀负杩戜技
         return {geo_origin_lon_, geo_origin_lat_, geo_origin_height_ + result.z};
     } else if (source_cs_.NeedsOGRTransform() && ogr_transform_) {
-        // EPSG/WKT: 使用OGR转换
-        // 先减去原点偏移
+        // EPSG/WKT: 浣跨敤OGR杞崲
+        // 鍏堝噺鍘诲師鐐瑰亸绉?
         auto [origin_x, origin_y, origin_z] = source_cs_.GetSourceOrigin();
         result.x += origin_x;
         result.y += origin_y;
         result.z += origin_z;
 
-        ogr_transform_->Transform(1, &result.x, &result.y, &result.z);
+        {
+            std::lock_guard<std::mutex> lock(ogr_mutex_);
+            ogr_transform_->Transform(1, &result.x, &result.y, &result.z);
+        }
     } else {
-        // LocalCartesian: 使用地理原点
+        // LocalCartesian: 浣跨敤鍦扮悊鍘熺偣
         result = {geo_origin_lon_, geo_origin_lat_, geo_origin_height_ + result.z};
     }
 
@@ -253,11 +259,11 @@ glm::dvec3 CoordinateTransformer::ToECEF(const glm::dvec3& point) const {
 
     glm::dvec3 result = point;
 
-    // 应用轴方向转换
+    // 搴旂敤杞存柟鍚戣浆鎹?
     result = axis_transform_ * glm::dvec4(result, 1.0);
 
     if (source_cs_.Type() == CoordinateType::ENU) {
-        // ENU: 加上偏移量后通过矩阵转换
+        // ENU: 鍔犱笂鍋忕Щ閲忓悗閫氳繃鐭╅樀杞崲
         auto enu_params = source_cs_.GetENUParams();
         if (enu_params) {
             result.x += enu_params->offset_x;
@@ -266,7 +272,7 @@ glm::dvec3 CoordinateTransformer::ToECEF(const glm::dvec3& point) const {
         }
         return enu_to_ecef_ * glm::dvec4(result, 1.0);
     } else {
-        // 其他类型: 先转WGS84，再转ECEF
+        // 鍏朵粬绫诲瀷: 鍏堣浆WGS84锛屽啀杞珽CEF
         glm::dvec3 wgs84 = ToWGS84(point);
         return CartographicToEcef(wgs84.x, wgs84.y, wgs84.z);
     }
@@ -280,43 +286,46 @@ glm::dvec3 CoordinateTransformer::ToLocalENU(const glm::dvec3& point) const {
 
     glm::dvec3 result = point;
 
-    // 根据坐标系类型处理
+    // 鏍规嵁鍧愭爣绯荤被鍨嬪鐞?
     if (source_cs_.Type() == CoordinateType::ENU) {
-        // ENU类型：Point是相对于SRSOrigin的ENU坐标
-        // 1. 加上SRSOrigin偏移得到绝对ENU坐标
+        // ENU绫诲瀷锛歅oint鏄浉瀵逛簬SRSOrigin鐨凟NU鍧愭爣
+        // 1. 鍔犱笂SRSOrigin鍋忕Щ寰楀埌缁濆ENU鍧愭爣
         auto enu_params = source_cs_.GetENUParams();
         if (enu_params) {
             result.x += enu_params->offset_x;
             result.y += enu_params->offset_y;
             result.z += enu_params->offset_z;
         }
-        // 2. ENU → ECEF（使用地理原点的ENU→ECEF矩阵）
+        // 2. ENU 鈫?ECEF锛堜娇鐢ㄥ湴鐞嗗師鐐圭殑ENU鈫扙CEF鐭╅樀锛?
         glm::dvec3 ecef = enu_to_ecef_ * glm::dvec4(result, 1.0);
-        // 3. ECEF → 局部ENU（使用地理原点的ECEF→ENU矩阵）
+        // 3. ECEF 鈫?灞€閮‥NU锛堜娇鐢ㄥ湴鐞嗗師鐐圭殑ECEF鈫扙NU鐭╅樀锛?
         glm::dvec4 enu = ecef_to_enu_ * glm::dvec4(ecef, 1.0);
         return {enu.x, enu.y, enu.z};
     } else if (source_cs_.NeedsOGRTransform() && ogr_transform_) {
-        // EPSG/WKT类型：Point是投影坐标
-        // 1. 加上源坐标原点偏移
+        // EPSG/WKT绫诲瀷锛歅oint鏄姇褰卞潗鏍?
+        // 1. 鍔犱笂婧愬潗鏍囧師鐐瑰亸绉?
         auto [origin_x, origin_y, origin_z] = source_cs_.GetSourceOrigin();
         result.x += origin_x;
         result.y += origin_y;
         result.z += origin_z;
 
-        // 2. 投影坐标 → WGS84地理坐标
-        ogr_transform_->Transform(1, &result.x, &result.y, &result.z);
+        // 2. 鎶曞奖鍧愭爣 鈫?WGS84鍦扮悊鍧愭爣
+        {
+            std::lock_guard<std::mutex> lock(ogr_mutex_);
+            ogr_transform_->Transform(1, &result.x, &result.y, &result.z);
+        }
 
-        // 3. 应用Geoid高度校正
+        // 3. 搴旂敤Geoid楂樺害鏍℃
         result.z = ApplyGeoidCorrection(result.y, result.x, result.z);
 
-        // 4. WGS84 → ECEF
+        // 4. WGS84 鈫?ECEF
         glm::dvec3 ecef = CartographicToEcef(result.x, result.y, result.z);
 
-        // 5. ECEF → 局部ENU
+        // 5. ECEF 鈫?灞€閮‥NU
         glm::dvec4 enu = ecef_to_enu_ * glm::dvec4(ecef, 1.0);
         return {enu.x, enu.y, enu.z};
     } else {
-        // LocalCartesian类型：无地理参考，直接返回
+        // LocalCartesian绫诲瀷锛氭棤鍦扮悊鍙傝€冿紝鐩存帴杩斿洖
         return result;
     }
 }
@@ -343,30 +352,30 @@ glm::dvec3 CoordinateTransformer::ConvertUpAxis(const glm::dvec3& point,
 glm::dmat4 CoordinateTransformer::CalcEnuToEcefMatrix(double lon_deg, double lat_deg, double height) {
     const double pi = std::acos(-1.0);
 
-    // 角度转弧度
+    // 瑙掑害杞姬搴?
     double lon = lon_deg * pi / 180.0;
     double phi = lat_deg * pi / 180.0;
 
     double sinPhi = std::sin(phi), cosPhi = std::cos(phi);
     double sinLon = std::sin(lon), cosLon = std::cos(lon);
 
-    // 计算卯酉圈曲率半径N
+    // 璁＄畻鍗厜鍦堟洸鐜囧崐寰凬
     double N = WGS84_A / std::sqrt(1.0 - WGS84_E2 * sinPhi * sinPhi);
 
-    // 计算ECEF坐标
+    // 璁＄畻ECEF鍧愭爣
     double x0 = (N + height) * cosPhi * cosLon;
     double y0 = (N + height) * cosPhi * sinLon;
     double z0 = (N * (1.0 - WGS84_E2) + height) * sinPhi;
 
-    // ENU基向量在ECEF中的表示
-    // 东(E): -sin(lon), cos(lon), 0
-    // 北(N): -sin(lat)*cos(lon), -sin(lat)*sin(lon), cos(lat)
-    // 天(U): cos(lat)*cos(lon), cos(lat)*sin(lon), sin(lat)
+    // ENU鍩哄悜閲忓湪ECEF涓殑琛ㄧず
+    // 涓?E): -sin(lon), cos(lon), 0
+    // 鍖?N): -sin(lat)*cos(lon), -sin(lat)*sin(lon), cos(lat)
+    // 澶?U): cos(lat)*cos(lon), cos(lat)*sin(lon), sin(lat)
     glm::dvec3 east(-sinLon,           cosLon,            0.0);
     glm::dvec3 north(-sinPhi * cosLon, -sinPhi * sinLon,  cosPhi);
     glm::dvec3 up(   cosPhi * cosLon,   cosPhi * sinLon,  sinPhi);
 
-    // 构建ENU→ECEF变换矩阵(旋转+平移)，列主序
+    // 鏋勫缓ENU鈫扙CEF鍙樻崲鐭╅樀(鏃嬭浆+骞崇Щ)锛屽垪涓诲簭
     glm::dmat4 T(1.0);
     T[0] = glm::dvec4(east,  0.0);
     T[1] = glm::dvec4(north, 0.0);
@@ -379,17 +388,17 @@ glm::dmat4 CoordinateTransformer::CalcEnuToEcefMatrix(double lon_deg, double lat
 glm::dvec3 CoordinateTransformer::CartographicToEcef(double lon_deg, double lat_deg, double height) {
     const double pi = std::acos(-1.0);
 
-    // 角度转弧度
+    // 瑙掑害杞姬搴?
     double lon = lon_deg * pi / 180.0;
     double phi = lat_deg * pi / 180.0;
 
     double sinPhi = std::sin(phi), cosPhi = std::cos(phi);
     double sinLon = std::sin(lon), cosLon = std::cos(lon);
 
-    // 计算卯酉圈曲率半径N
+    // 璁＄畻鍗厜鍦堟洸鐜囧崐寰凬
     double N = WGS84_A / std::sqrt(1.0 - WGS84_E2 * sinPhi * sinPhi);
 
-    // 计算ECEF坐标
+    // 璁＄畻ECEF鍧愭爣
     double x = (N + height) * cosPhi * cosLon;
     double y = (N + height) * cosPhi * sinLon;
     double z = (N * (1.0 - WGS84_E2) + height) * sinPhi;
@@ -402,13 +411,13 @@ glm::dmat4 CoordinateTransformer::GetAxisTransformMatrix(UpAxis from, UpAxis to)
         return glm::dmat4(1.0);
     }
 
-    // Z-Up → Y-Up: (x, y, z) → (x, -z, y)
-    // Y-Up → Z-Up: (x, y, z) → (x, z, -y)
+    // Z-Up 鈫?Y-Up: (x, y, z) 鈫?(x, -z, y)
+    // Y-Up 鈫?Z-Up: (x, y, z) 鈫?(x, z, -y)
     if (from == UpAxis::Z_UP && to == UpAxis::Y_UP) {
-        // Z-Up → Y-Up
-        // 新X = 原X
-        // 新Y = 原Z
-        // 新Z = -原Y
+        // Z-Up 鈫?Y-Up
+        // 鏂癤 = 鍘焁
+        // 鏂癥 = 鍘焃
+        // 鏂癦 = -鍘焂
         return glm::dmat4(
             1,  0,  0, 0,
             0,  0,  1, 0,
@@ -416,10 +425,10 @@ glm::dmat4 CoordinateTransformer::GetAxisTransformMatrix(UpAxis from, UpAxis to)
             0,  0,  0, 1
         );
     } else {
-        // Y-Up → Z-Up
-        // 新X = 原X
-        // 新Y = -原Z
-        // 新Z = 原Y
+        // Y-Up 鈫?Z-Up
+        // 鏂癤 = 鍘焁
+        // 鏂癥 = -鍘焃
+        // 鏂癦 = 鍘焂
         return glm::dmat4(
             1,  0,  0, 0,
             0,  0, -1, 0,

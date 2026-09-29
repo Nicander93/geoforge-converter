@@ -1,9 +1,9 @@
 [package]
 name = "_3dtile"
-version = "0.2.3"
+version = "0.2.4"
 authors = ["fanzhenhua <fanzhenhua@superengine.com.cn>"]
 edition = "2021"
-description = "GeoForge OSGB → 3D Tiles converter runtime (upstream: fanvanzh/3dtiles)"
+description = "GeoForge OSGB 鈫?3D Tiles converter runtime (upstream: fanvanzh/3dtiles)"
 
 [dependencies]
 libc = "0.2"
