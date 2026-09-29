@@ -1,6 +1,8 @@
 #include <osg/Material>
 #include <osg/PagedLOD>
 #include <osgDB/ReadFile>
+#include <osgDB/Registry>
+#include <osg/Referenced>
 #include <osgDB/ConvertUTF>
 #include <osgUtil/Optimizer>
 #include <osgUtil/SmoothingVisitor>
@@ -42,7 +44,7 @@ using namespace std;
 #undef min
 #endif // max
 
-// 引入osg插件和序列化
+// 寮曞叆osg鎻掍欢鍜屽簭鍒楀寲
 // USE_OSGPLUGIN is needed for static plugin registration on Linux/macOS
 // On Windows with dynamic linking, plugins are loaded at runtime instead
 #if defined(__unix__) || defined(__APPLE__)
@@ -96,6 +98,43 @@ void log_osg_plugin_info() {
 
     printf("=== End of OSG Plugin Information ===\n\n");
 }
+
+namespace {
+
+// OSG 3.6 Registry / dynamic plugin load is not fully re-entrant. Parallel rayon
+// workers racing first-load of osgPlugins-*.dll has produced STATUS_HEAP_CORRUPTION
+// on Windows after otherwise-successful multi-block converts. Serialize DB reads
+// and ensure thread-safe refcounting + plugin warm-up once.
+std::mutex& osg_db_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+void ensure_osg_thread_safe() {
+    static std::once_flag once;
+    std::call_once(once, []() {
+        // OSG 3.6.5 in this tree is built with thread-safe ref/unref by default.
+        // Warm up common ReaderWriters on one thread so workers do not race DLL load.
+        if (osgDB::Registry* registry = osgDB::Registry::instance()) {
+            const char* exts[] = {
+                "osgb", "osg", "ive", "jpeg", "jpg", "png", "rgb", "tga", "tiff", "tif"
+            };
+            for (const char* ext : exts) {
+                registry->getReaderWriterForExtension(ext);
+            }
+        }
+    });
+}
+
+osg::ref_ptr<osg::Node> read_node_files_threadsafe(const std::vector<std::string>& fileNames) {
+    ensure_osg_thread_safe();
+    std::vector<std::string> mutableNames = fileNames;  // OSG 3.6 API wants non-const
+    std::lock_guard<std::mutex> lock(osg_db_mutex());
+    return osgDB::readNodeFiles(mutableNames);
+}
+
+}  // namespace
+
 
 template<class T>
 void put_val(std::vector<unsigned char>& buf, T val) {
@@ -164,10 +203,10 @@ public:
         else
             other_geometry_array.push_back(&geometry);
 
-        // 获取全局坐标转换器
+        // 鑾峰彇鍏ㄥ眬鍧愭爣杞崲鍣?
         coords::CoordinateTransformer* transformer = GetGlobalTransformer();
 
-        // 检查是否有坐标转换器且需要OGR转换
+        // 妫€鏌ユ槸鍚︽湁鍧愭爣杞崲鍣ㄤ笖闇€瑕丱GR杞崲
         bool needs_transform = transformer && transformer->HasGeoReference();
 
         if (needs_transform)
@@ -195,7 +234,7 @@ public:
              * can occur when the tile is located far from the origin.
              */
             auto Correction = [&](glm::dvec3 Point) {
-                // 使用新的CoordinateTransformer进行坐标转换
+                // 浣跨敤鏂扮殑CoordinateTransformer杩涜鍧愭爣杞崲
                 return transformer->ToLocalENU(Point);
             };
             vector<glm::dvec4> OriginalPoints(8);
@@ -415,7 +454,7 @@ osg_tree get_all_tree(std::string& file_name, bool* read_error = nullptr) {
 
     InfoVisitor infoVisitor(get_parent(file_name));
     {   // add block to release Node
-        osg::ref_ptr<osg::Node> root = osgDB::readNodeFiles(fileNames);
+        osg::ref_ptr<osg::Node> root = read_node_files_threadsafe(fileNames);
         if (!root) {
             std::string name = utf8_string(file_name.c_str());
             LOG_E("read node files [%s] fail!", name.c_str());
@@ -1118,7 +1157,7 @@ bool osgb2glb_buf(std::string path, std::string& glb_buff, MeshInfo& mesh_info, 
         log_osg_plugin_info();
     });
 
-    osg::ref_ptr<osg::Node> root = osgDB::readNodeFiles(fileNames);
+    osg::ref_ptr<osg::Node> root = read_node_files_threadsafe(fileNames);
     if (!root.valid()) {
         return false;
     }
