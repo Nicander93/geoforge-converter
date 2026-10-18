@@ -17,6 +17,14 @@ inline void log_printf_impl(spdlog::level::level_enum lvl, const char* format, .
 	std::vsnprintf(buf, sizeof(buf), format, args);
 	va_end(args);
 	spdlog::log(lvl, "{}", buf);
+	// The desktop processor keeps _3dtile's stdout closed on Windows (OSG
+	// crash), so spdlog output never reaches it. Repeat warnings and errors on
+	// stderr in the converter's env_logger style so the reason for a failure
+	// is visible to the caller.
+	if (lvl >= spdlog::level::warn) {
+		std::fprintf(stderr, "%s: native - %s\n", lvl >= spdlog::level::err ? "ERROR" : "WARN", buf);
+		std::fflush(stderr);
+	}
 }
 
 #define LOG_D(format, ...) \

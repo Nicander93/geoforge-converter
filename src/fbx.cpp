@@ -25,6 +25,8 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -142,6 +144,15 @@ static std::string ufbx_string_to_std(const ufbx_string &s) {
   return std::string(s.data, s.length);
 }
 
+static void warn_texture_relocated(const std::string& recorded, const std::filesystem::path& found) {
+  static std::mutex mutex;
+  static std::set<std::string> warned;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!warned.insert(recorded).second) return;
+  LOG_W("Texture '%s' does not exist; using '%s' found under the model folder",
+        recorded.c_str(), found.u8string().c_str());
+}
+
 static std::filesystem::path resolve_texture_path(const std::string &fbxPath,
                                                   const ufbx_texture *tex,
                                                   const std::vector<std::string>& textureRoots) {
@@ -193,6 +204,24 @@ static std::filesystem::path resolve_texture_path(const std::string &fbxPath,
       if (!p.is_absolute() && std::filesystem::exists(candidate)) return candidate;
       candidate = rootPath / p.filename();
       if (std::filesystem::exists(candidate)) return candidate;
+  }
+
+  // Exported FBX files often keep the author's absolute texture path
+  // (e.g. "C:/Users/me/Dragon/textures/skin.jpg") while the textures
+  // ship next to the model as "textures/skin.jpg". Try the trailing parts
+  // of the recorded path under the FBX folder, longest first.
+  if (!fbxPath.empty()) {
+      const std::filesystem::path fbxDir = std::filesystem::u8path(fbxPath).parent_path();
+      std::vector<std::filesystem::path> parts;
+      for (const auto& part : p.relative_path()) parts.push_back(part);
+      for (size_t start = 1; start + 1 < parts.size(); ++start) {
+          std::filesystem::path candidate = fbxDir;
+          for (size_t i = start; i < parts.size(); ++i) candidate /= parts[i];
+          if (std::filesystem::exists(candidate)) {
+              warn_texture_relocated(path, candidate);
+              return candidate;
+          }
+      }
   }
 
   return {};
@@ -699,6 +728,15 @@ bool FBXLoader::load() {
 
     LOG_I("FBX File Original Unit Meters: %f", scene->settings.unit_meters);
 
+    // Only static geometry is converted. ufbx gives skinned meshes in their
+    // bind pose and node transforms at their default values, so say so
+    // instead of leaving the user to wonder why nothing moves.
+    if (scene->anim_stacks.count > 0 || scene->skin_deformers.count > 0 || scene->blend_deformers.count > 0) {
+        LOG_W("MODEL_ANIMATION_IGNORED: %zu animation stack(s), %zu skin and %zu blend-shape deformer(s) are not converted; "
+              "meshes are exported in their bind (rest) pose",
+              scene->anim_stacks.count, scene->skin_deformers.count, scene->blend_deformers.count);
+    }
+
     displayLayerHiddenNodes.clear();
     for (size_t i = 0; i < scene->display_layers.count; i++) {
         ufbx_display_layer *layer = scene->display_layers.data[i];
@@ -723,8 +761,13 @@ bool FBXLoader::load() {
         return false;
     }
     if (missing_texture_is_error && !missing_texture_references.empty()) {
-        LOG_E("FBX import rejected: %zu texture reference(s) are missing or unreadable",
-              missing_texture_references.size());
+        std::string list;
+        for (const auto& reference : missing_texture_references) {
+            if (!list.empty()) list += "; ";
+            list += reference;
+        }
+        LOG_E("FBX import rejected: %zu texture reference(s) are missing or unreadable: %s",
+              missing_texture_references.size(), list.c_str());
         return false;
     }
     return true;
