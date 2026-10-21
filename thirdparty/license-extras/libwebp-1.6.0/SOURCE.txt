@@ -1,0 +1,12 @@
+PATENTS in this directory is the unmodified "Additional IP Rights Grant (Patents)"
+file of libwebp 1.6.0 (the version installed by the vcpkg libwebp port 1.6.0#2).
+The vcpkg port installs only COPYING as share/libwebp/copyright, so the patent
+grant is vendored here and copied by scripts/collect-licenses.ps1 to
+licenses/vcpkg/libwebp/PATENTS in the release archive.
+
+Source:  https://raw.githubusercontent.com/webmproject/libwebp/v1.6.0/PATENTS
+Mirror:  https://chromium.googlesource.com/webm/libwebp/+/refs/tags/v1.6.0/PATENTS
+Tag:     v1.6.0 (tag object b7e29b9d75bd31422b00c2a446d49d7af06c328d,
+         commit 4fa21912338357f89e4fd51cf2368325b59e9bd9)
+SHA-256: cc3273e0694ea5896145e0677699b53471b03ea43021ddc50e7923fbb9f5023c
+Both locations returned byte-identical files on 2026-10-21.
