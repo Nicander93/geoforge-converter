@@ -15,6 +15,11 @@ $Converter = Join-Path $Runtime "_3dtile.exe"
 if (-not (Test-Path -LiteralPath $Converter -PathType Leaf)) {
   throw "Release archive has no _3dtile.exe: $Zip"
 }
+foreach ($notice in @("LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.txt", "LGPL-SOURCE-OFFER.txt", "licenses\inventory.json")) {
+  if (-not (Test-Path -LiteralPath (Join-Path $Runtime $notice) -PathType Leaf)) {
+    throw "Release archive has no ${notice}: $Zip"
+  }
+}
 
 $Cases = @(
   @{

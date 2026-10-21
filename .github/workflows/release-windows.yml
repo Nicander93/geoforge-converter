@@ -83,7 +83,7 @@ jobs:
         run: |
           $ver = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '0.0.0-ci' }
           powershell -File scripts/package-windows.ps1 -OutDir dist/converter -Version $ver
-          $required = @('_3dtile.exe', 'msvcp140.dll', 'msvcp140_2.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')
+          $required = @('_3dtile.exe', 'msvcp140.dll', 'msvcp140_2.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'LICENSE', 'NOTICE', 'THIRD-PARTY-NOTICES.txt', 'LGPL-SOURCE-OFFER.txt')
           $missing = $required | Where-Object { -not (Test-Path (Join-Path 'dist/converter' $_)) }
           if ($missing) { throw "Converter package is missing: $($missing -join ', ')" }
           Push-Location dist/converter

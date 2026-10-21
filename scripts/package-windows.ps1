@@ -7,7 +7,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$Exe = Join-Path $Root "target\release\_3dtile.exe"
+$TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root "target" }
+$Exe = Join-Path $TargetDir "release\_3dtile.exe"
 if (-not (Test-Path $Exe)) {
   Write-Error "_3dtile.exe missing. Run: cargo build --release"
 }
@@ -16,7 +17,9 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Copy-Item -Force $Exe (Join-Path $OutDir "_3dtile.exe")
 
 $ExeDir = Split-Path $Exe -Parent
-$VcpkgRoot = Join-Path $Root "vcpkg_installed\x64-windows"
+# Same override as build.rs: a pre-installed vcpkg tree outside the checkout.
+$VcpkgInstalled = if ($env:GEOFORGE_VCPKG_INSTALLED_ROOT) { $env:GEOFORGE_VCPKG_INSTALLED_ROOT } else { Join-Path $Root "vcpkg_installed" }
+$VcpkgRoot = Join-Path $VcpkgInstalled "x64-windows"
 foreach ($dllDir in @($ExeDir, (Join-Path $VcpkgRoot "bin"))) {
   if (-not (Test-Path $dllDir)) { continue }
   Get-ChildItem $dllDir -Filter *.dll -ErrorAction SilentlyContinue | ForEach-Object {
@@ -108,9 +111,15 @@ if (Test-Path $geoids) {
   Copy-RuntimeDir $geoids (Join-Path $OutDir "geoids") | Out-Null
 }
 
+# LICENSE, NOTICE, THIRD-PARTY-NOTICES.txt, LGPL-SOURCE-OFFER.txt, licenses/
+& (Join-Path $PSScriptRoot "collect-licenses.ps1") -OutDir $OutDir -Root $Root -VcpkgInstalledRoot $VcpkgInstalled -Version $Version
+if (-not $?) { Write-Error "collect-licenses.ps1 failed" }
+
 $manifest = @{
   name = "geoforge-converter"
   version = $Version
+  license = "Apache-2.0"
+  notices = @("LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.txt", "LGPL-SOURCE-OFFER.txt", "licenses/")
   upstream = "fanvanzh/3dtiles"
   upstreamCommit = "see docs/UPSTREAM.md (GeoForge engines snapshot bdb8b7fd31c1eaa7ef65ad9f3419c6ab8c56c149)"
   platform = "windows-x64"
