@@ -139,7 +139,8 @@ foreach ($name in ($ports.Keys | Sort-Object)) {
       $portRef = "$($pkgs[0].downloadLocation)"
     }
     $sources = @($pkgs | Select-Object -Skip 2 | ForEach-Object { "$($_.downloadLocation)" } |
-      Where-Object { $_ -and $_ -ne "NONE" -and $_ -ne "NOASSERTION" })
+      Where-Object { $_ -and $_ -ne "NONE" -and $_ -ne "NOASSERTION" } |
+      ForEach-Object { $_ -replace '\$\{[A-Za-z_]*VER[A-Za-z_]*\}', ($p.version -replace '#.*$', '') })
   }
   $unknown = @("", "NOASSERTION", "LicenseRef-vcpkg-null")
   if ($unknown -contains $license) {
