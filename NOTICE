@@ -1,0 +1,107 @@
+geoforge-converter
+Copyright 2026 Nicander93 and the GeoForge contributors
+
+This product is a modified version of 3dtiles
+(https://github.com/fanvanzh/3dtiles), originally written by fanvanzh
+(fanzhenhua) and the 3dtiles contributors, and licensed under the Apache
+License, Version 2.0. A copy of that license is in the LICENSE file.
+
+Upstream base
+-------------
+The GeoForge sources were taken from fanvanzh/3dtiles at commit
+acbcf603f33fdfe3c34b704a8b019c4fd32a8376 (2026-04-13) and imported into this
+repository through the GeoForge snapshot Nicander93/3dtiles
+engines/3dtiles-converter at commit bdb8b7fd31c1eaa7ef65ad9f3419c6ab8c56c149
+(see docs/UPSTREAM.md). The upstream project does not ship a NOTICE file, and
+its source files carry no per-file copyright headers.
+
+Statement of changes (Apache-2.0, section 4(b))
+-----------------------------------------------
+Compared with the upstream base commit above, the GeoForge contributors made
+the following changes. The complete history of every change is in the git log
+of https://github.com/Nicander93/geoforge-converter.
+
+Modified files:
+  .gitignore
+  .gitmodules
+  CMakeLists.txt
+  Cargo.toml
+  README.md
+  build-dockerfile.sh
+  build.rs
+  src/FBXPipeline.cpp
+  src/FBXPipeline.h
+  src/common.rs
+  src/coordinate_system.h
+  src/coordinate_transformer.cpp
+  src/coordinate_transformer.h
+  src/extern.h
+  src/fbx.cpp
+  src/fbx.h
+  src/fbx.rs
+  src/main.rs
+  src/osgb.rs
+  src/osgb23dtile.cpp
+  src/shape.rs
+  src/shp23dtile.cpp
+  vcpkg.json
+
+Files added by GeoForge:
+  .github/workflows/release-windows.yml
+  Cargo.lock
+  NOTICE
+  docs/BUILD_AND_TEST_P0_P1.md
+  docs/CHANGELOG_P0_P1.md
+  docs/CHANGELOG_P2.md
+  docs/P0_P1_IMPLEMENTATION_SUMMARY.md
+  docs/P2_STREAMING_IMPLEMENTATION.md
+  docs/P2_TESTING.md
+  docs/P3_README.md
+  docs/P3_RESUME_IMPLEMENTATION.md
+  docs/P3_TESTING_GUIDE.md
+  docs/UPSTREAM.md
+  scripts/collect-licenses.ps1
+  scripts/package-windows.ps1
+  scripts/smoke-release-windows.ps1
+  src/block_job.rs
+  src/block_manifest.rs
+  src/fingerprint.rs
+  tests/fbx_uv_orientation.rs
+  tests/fixtures/ (test data)
+  thirdparty/tinygltf/LICENSE
+  thirdparty/tinygltf/README.md
+  thirdparty/tinygltf/tiny_gltf.h
+
+Upstream files and directories not included in this repository:
+  .cargo/config.toml
+  .devcontainer/
+  .dockerignore
+  .github/workflows/ (upstream CI workflows)
+  .vscode/
+  README_EN.md
+  README_ZH.md
+  data/
+  docs/coordinate_system_refactor.md
+  index.html
+  matrix.xlsx
+  tests/e2e/
+  tests/test_coordinate_system.cpp
+  todo.txt
+  vs/
+
+Summary of the functional changes: Windows x64 release packaging; OSGB
+block-level parallel conversion with streaming, resume and a block manifest;
+serialized OGR coordinate transformations and OSG database reads for
+multi-threaded OSGB conversion; model import configuration (--model-config,
+units, axes, georeference, missing-texture policy and texture roots); FBX
+texture path recovery, warnings for ignored animation and skinning, and native
+warnings and errors repeated on stderr; vendored tinygltf headers; and
+documentation for these changes.
+
+Third-party components
+----------------------
+Binary releases of geoforge-converter bundle third-party libraries. Their
+names, versions, licenses, source locations and license texts are listed in
+THIRD-PARTY-NOTICES.txt and in the licenses/ directory of each release
+archive. Information about obtaining the source code of the LGPL- and
+MPL-licensed libraries is in LGPL-SOURCE-OFFER.txt in the same archive.
